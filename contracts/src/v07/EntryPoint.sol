@@ -18,7 +18,7 @@ import {ValidationData, _parseValidationData, min} from "account-abstraction-v7/
 
 import "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "../SimulationOverrideHelper.sol";
+import "@openzeppelin/contracts/utils/StorageSlot.sol";
 
 /*
  * Account-Abstraction (EIP-4337) singleton EntryPoint implementation.
@@ -557,7 +557,10 @@ contract EntryPoint is IEntryPoint, StakeManager, NonceManager, ReentrancyGuard 
                 return maxFeePerGas;
             }
             // Check if baseFee is overridden in storage, otherwise use block.basefee
-            uint256 blockBaseFeePerGas = SimulationOverrideHelper.getBlockBaseFee();
+            uint256 blockBaseFeePerGas = StorageSlot.getUint256Slot(keccak256("BLOCK_BASE_FEE_PER_GAS")).value;
+            if (blockBaseFeePerGas == 0) {
+                blockBaseFeePerGas = block.basefee;
+            }
             return min(maxFeePerGas, maxPriorityFeePerGas + blockBaseFeePerGas);
         }
     }

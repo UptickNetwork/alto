@@ -1,9 +1,9 @@
 import type {
     StateOverrides,
-    UserOperation06,
-    UserOperation07
+    UserOperationV06,
+    UserOperationV07
 } from "@alto/types"
-import { ERC7769Errors, executionResultSchema } from "@alto/types"
+import { ValidationErrors, executionResultSchema } from "@alto/types"
 import {
     type Logger,
     deepHexlify,
@@ -72,8 +72,8 @@ export function prepareStateOverride({
     stateOverrides,
     config
 }: {
-    userOps: (UserOperation06 | UserOperation07)[]
-    queuedUserOps: (UserOperation06 | UserOperation07)[]
+    userOps: (UserOperationV06 | UserOperationV07)[]
+    queuedUserOps: (UserOperationV06 | UserOperationV07)[]
     stateOverrides?: StateOverrides
     config: Pick<AltoConfig, "balanceOverride" | "codeOverrideSupport">
 }): StateOverride | undefined {
@@ -97,31 +97,6 @@ export const simulationErrors = parseAbi([
     "error CallPhaseReverted(bytes reason)"
 ])
 
-// Returns error code based on EntryPoint's AA error message.
-export const toErc7769Code = (entryPointError: string) => {
-    if (entryPointError.includes("AA24") || entryPointError.includes("AA34")) {
-        return ERC7769Errors.InvalidSignature
-    }
-
-    if (entryPointError.includes("AA31")) {
-        return ERC7769Errors.PaymasterDepositTooLow
-    }
-
-    if (entryPointError.includes("AA32")) {
-        return ERC7769Errors.ExpiresShortly
-    }
-
-    if (
-        entryPointError.includes("AA30") ||
-        entryPointError.includes("AA33") ||
-        entryPointError.includes("AA36")
-    ) {
-        return ERC7769Errors.SimulatePaymasterValidation
-    }
-
-    return ERC7769Errors.SimulateValidation
-}
-
 export function decodeSimulateHandleOpError(
     error: unknown,
     logger: Logger
@@ -129,9 +104,11 @@ export function decodeSimulateHandleOpError(
     // Check if it's a BaseError with ContractFunctionRevertedError
     if (!(error instanceof BaseError)) {
         logger.warn("Not a BaseError")
-        throw new Error(
-            "Unknown error, could not parse simulate validation result."
-        )
+        return {
+            result: "failed",
+            data: "Unknown error, could not parse simulate validation result.",
+            code: ValidationErrors.SimulateValidation
+        }
     }
 
     let errorName: string
@@ -154,15 +131,17 @@ export function decodeSimulateHandleOpError(
             return {
                 result: "failed",
                 data: "Sender has no code or factory not deployed",
-                code: ERC7769Errors.SimulateValidation
+                code: ValidationErrors.SimulateValidation
             }
         }
 
         if (!error.data?.args) {
             logger.warn("Missing args")
-            throw new Error(
-                "Unknown error, could not parse simulate validation result."
-            )
+            return {
+                result: "failed",
+                data: "Unknown error, could not parse simulate validation result.",
+                code: ValidationErrors.SimulateValidation
+            }
         }
 
         errorName = error.data.errorName
@@ -184,9 +163,11 @@ export function decodeSimulateHandleOpError(
 
         if (!rawRevertBytes) {
             logger.warn("Failed to find raw revert bytes")
-            throw new Error(
-                "Unknown error, could not parse simulate validation result."
-            )
+            return {
+                result: "failed",
+                data: "Unknown error, could not parse simulate validation result.",
+                code: ValidationErrors.SimulateValidation
+            }
         }
 
         try {
@@ -203,59 +184,50 @@ export function decodeSimulateHandleOpError(
 
             errorName = decoded.errorName
             args = decoded.args || []
-        } catch {
+        } catch (decodeError) {
             logger.warn({ rawRevertBytes }, "Failed to decode raw revert bytes")
-            throw new Error(
-                "Unknown error, could not parse simulate validation result."
-            )
+            return {
+                result: "failed",
+                data: "Unknown error, could not parse simulate validation result.",
+                code: ValidationErrors.SimulateValidation
+            }
         }
     } else {
-        logger.warn(
-            { err: contractFunctionRevertedError },
-            "Unknown error, could not parse simulate validation result."
-        )
-        throw new Error(
-            "Unknown error, could not parse simulate validation result."
-        )
+        return {
+            result: "failed",
+            data: "Unknown error, could not parse simulate validation result.",
+            code: ValidationErrors.SimulateValidation
+        }
     }
 
     switch (errorName) {
-        case "FailedOp": {
-            const errorMessage = args[1] as string
+        case "FailedOp":
             return {
                 result: "failed",
-                data: errorMessage,
-                code: toErc7769Code(errorMessage)
+                data: args[1] as string,
+                code: ValidationErrors.SimulateValidation
             }
-        }
 
-        case "FailedOpWithRevert": {
-            const errorMessage = args[1] as string
-            const revertReason = parseFailedOpWithRevert(args[2] as Hex)
+        case "FailedOpWithRevert":
             return {
                 result: "failed",
-                data: `${errorMessage} ${revertReason}`,
-                code: toErc7769Code(errorMessage)
+                data: `${args[1]} ${parseFailedOpWithRevert(args[2] as Hex)}`,
+                code: ValidationErrors.SimulateValidation
             }
-        }
 
-        case "CallPhaseReverted": {
-            const errorMessage = args[0] as string
+        case "CallPhaseReverted":
             return {
                 result: "failed",
-                data: errorMessage,
-                code: ERC7769Errors.UserOperationReverted
+                data: args[0] as Hex,
+                code: ValidationErrors.SimulateValidation
             }
-        }
 
-        case "Error": {
-            const errorMessage = args[0] as string
+        case "Error":
             return {
                 result: "failed",
-                data: errorMessage,
-                code: toErc7769Code(errorMessage)
+                data: args[0] as string,
+                code: ValidationErrors.SimulateValidation
             }
-        }
 
         // 0.6 handleOp reverts with ExecutionResult if successful
         case "ExecutionResult": {
@@ -273,9 +245,11 @@ export function decodeSimulateHandleOpError(
                 { errorName },
                 "Unknown ContractFunctionRevertedError name"
             )
-            throw new Error(
-                "Unknown error, could not parse simulate validation result."
-            )
+            return {
+                result: "failed",
+                data: "Unknown error, could not parse simulate validation result.",
+                code: ValidationErrors.SimulateValidation
+            }
         }
     }
 }
@@ -288,7 +262,7 @@ export async function prepareSimulationOverrides06({
     useCodeOverride,
     config
 }: {
-    userOp: UserOperation06
+    userOp: UserOperationV06
     entryPoint: Address
     userStateOverrides?: StateOverrides
     useCodeOverride: boolean
@@ -322,14 +296,14 @@ export async function prepareSimulationOverrides06({
 export async function prepareSimulationOverrides07({
     userOp,
     queuedUserOps,
-    entryPoint,
+    epSimulationsAddress,
     gasPriceManager,
     userStateOverrides = {},
     config
 }: {
-    userOp: UserOperation07
-    queuedUserOps: UserOperation07[]
-    entryPoint: Address
+    userOp: UserOperationV07
+    queuedUserOps: UserOperationV07[]
+    epSimulationsAddress: Address
     gasPriceManager: GasPriceManager
     userStateOverrides?: StateOverrides
     config: Pick<AltoConfig, "codeOverrideSupport" | "balanceOverride">
@@ -338,15 +312,13 @@ export async function prepareSimulationOverrides07({
 
     // Add baseFee override for v0.7 EntryPoint simulations
     if (config.codeOverrideSupport) {
-        const baseFee = await gasPriceManager.getBaseFee()
+        const baseFee = await gasPriceManager.getBaseFee().catch(() => 0n)
         if (baseFee > 0n) {
             const slot = keccak256(toHex("BLOCK_BASE_FEE_PER_GAS"))
             const value = toHex(baseFee, { size: 32 })
 
-            mergedStateOverrides[entryPoint] = {
-                ...deepHexlify(mergedStateOverrides?.[entryPoint] || {}),
+            mergedStateOverrides[epSimulationsAddress] = {
                 stateDiff: {
-                    ...(mergedStateOverrides[entryPoint]?.stateDiff || {}),
                     [slot]: value
                 }
             }

@@ -2,11 +2,11 @@ import type { AltoConfig } from "../createConfig"
 import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 
 export class OptimismManager {
-    private readonly l1FeeQueue: MinMaxQueue
+    private l1FeeQueue: MinMaxQueue
 
     constructor({ config }: { config: AltoConfig }) {
         this.l1FeeQueue = createMinMaxQueue({
-            queueName: "l1-fee-queue",
+            keyPrefix: "l1-fee-queue",
             config
         })
     }

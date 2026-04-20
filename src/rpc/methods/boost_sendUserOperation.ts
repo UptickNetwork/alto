@@ -51,7 +51,7 @@ export const boostSendUserOperationHandler = createMethodHandler({
                 userOp,
                 entryPoint,
                 apiVersion,
-                isBoosted: true
+                boost: true
             })
 
             status = result

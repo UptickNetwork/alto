@@ -9,11 +9,8 @@ import type {
     ILogArgsInput,
     IMempoolArgsInput,
     IOptionsInput,
-    IPreVerificationGasArgsInput,
-    IRedisArgsInput,
     IRpcArgsInput,
-    IServerArgsInput,
-    IUtilityArgsInput
+    IServerArgsInput
 } from "./bundler"
 
 export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
@@ -75,27 +72,6 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: 0
     },
-    "dynamic-gas-price": {
-        description:
-            "Use dynamic gas pricing based on block fullness instead of viem's estimateFeesPerGas",
-        type: "boolean",
-        require: false,
-        default: false
-    },
-    "dynamic-gas-price-lookback-blocks": {
-        description:
-            "Number of recent blocks to look back for dynamic gas price calculation",
-        type: "number",
-        require: false,
-        default: 10
-    },
-    "dynamic-gas-price-target-inclusion-blocks": {
-        description:
-            "Number of future blocks to guarantee inclusion for using worst-case base fee calculation",
-        type: "number",
-        require: false,
-        default: 3
-    },
     "mempool-max-parallel-ops": {
         description:
             "Maximum amount of parallel user ops to keep in the meempool (same sender, different nonce keys)",
@@ -117,12 +93,6 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: true
     },
-    "max-gas-per-user-op": {
-        description: "Maximum amount of gas per user operation",
-        type: "string",
-        require: false,
-        default: "20000000"
-    },
     "max-gas-per-bundle": {
         description: "Maximum amount of gas per bundle",
         type: "string",
@@ -141,77 +111,72 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         type: "boolean",
         default: false
     },
-    "skip-local-gas-calculations": {
+    "rpc-gas-estimate": {
         description:
-            "Skip break-even gas price calculation and use network gas price only. Enable on chains where eth_estimateGas must be called.",
+            "Should the bundler make a eth_estimateGas call to estimate the handleOps gasLimit",
         type: "boolean",
         default: false
     },
-    "flashblocks-preconfirmation-time": {
-        description: "Time in milliseconds for preconfirmation (flashblocks)",
-        type: "number",
-        default: undefined
-    },
-    "receipt-cache-ttl": {
-        description: "TTL for the user operation receipt cache in milliseconds",
-        type: "number",
-        default: 60000,
-        require: false
-    }
-}
-
-export const redisOptions: CliCommandOptions<IRedisArgsInput> = {
-    "enable-horizontal-scaling": {
-        description: "Enable horizontal scaling using Redis",
+    "flashblocks-enabled": {
+        description: "Enable flashblocks. Overrides some RPC calls parameters.",
         type: "boolean",
-        require: false,
         default: false
-    },
-    "enable-redis-receipt-cache": {
-        description: "Enable Redis for user operation receipt cache",
-        type: "boolean",
-        require: false,
-        default: false
-    },
-    "redis-key-prefix": {
-        description: "Redis key prefix for all Redis data structures",
-        type: "string",
-        require: false,
-        default: "alto"
-    },
-    "redis-endpoint": {
-        description:
-            "Common Redis connection URL for all Redis operations (except userOp events)",
-        type: "string",
-        require: false
-    },
-    "redis-events-queue-endpoint": {
-        description: "Redis endpoint for userOp events queue",
-        type: "string",
-        require: false
-    },
-    "redis-events-queue-name": {
-        description: "Queue name for userOp events",
-        type: "string",
-        require: false,
-        default: "UserOperationStatusBullEventsQueue"
-    },
-    "redis-events-queue-flush-interval": {
-        description:
-            "Interval in milliseconds to flush batched events to Redis (default: 1000ms)",
-        type: "number",
-        require: false,
-        default: 1000
     }
 }
 
 export const mempoolOptions: CliCommandOptions<IMempoolArgsInput> = {
-    "restoration-queue-timeout": {
+    "redis-mempool-url": {
         description:
-            "Timeout in milliseconds for listening to mempool restoration queue (default: 30 minutes)",
+            "Redis connection URL (required if redis-mempool is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-mempool-concurrency": {
+        description: "Number of concurrent jobs to process",
         type: "number",
         require: false,
-        default: 30 * 60 * 1000
+        default: 10
+    },
+    "redis-mempool-queue-name": {
+        description: "Redis mempool queue name",
+        type: "string",
+        require: false,
+        default: "outstanding-mempool"
+    },
+    "redis-op-status-url": {
+        description: "Redis connection URL for user operation status tracking",
+        type: "string",
+        require: false
+    },
+    "redis-op-status-queue-name": {
+        description: "Queue name for user operation status",
+        type: "string",
+        require: false,
+        default: "userop-status"
+    },
+    "redis-gas-price-queue-url": {
+        description:
+            "Redis connection URL (required if redis-gas-price-queue is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-gas-price-queue-name": {
+        description: "Queue name to store gas prices",
+        type: "string",
+        require: false,
+        default: "gas-price"
+    },
+    "redis-sender-manager-url": {
+        description:
+            "Redis connection URL (required if redis-sender-manager is enabled)",
+        type: "string",
+        require: false
+    },
+    "redis-sender-manager-queue-name": {
+        description: "Queue name to executors",
+        type: "string",
+        require: false,
+        default: "sender-manager"
     },
     "mempool-max-parallel-ops": {
         description:
@@ -227,25 +192,12 @@ export const mempoolOptions: CliCommandOptions<IMempoolArgsInput> = {
         require: false,
         default: 0
     },
-    "mempool-pop-batch-size": {
-        description:
-            "Number of user operations to pop from the mempool at once for bundling",
-        type: "number",
-        require: false,
-        default: 10
-    },
     "enforce-unique-senders-per-bundle": {
         description:
             "Include user ops with the same sender in the single bundle",
         type: "boolean",
         require: false,
         default: true
-    },
-    "ignored-paymasters": {
-        description:
-            "Comma-separated list of paymaster addresses to ignore when checking for queued user operations",
-        type: "string",
-        require: false
     }
 }
 
@@ -267,12 +219,7 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
             description:
                 "Address of the EntryPoint simulations contract for v0.8",
             type: "string",
-            require: false
-        },
-        "entrypoint-simulation-contract-v9": {
-            description:
-                "Address of the EntryPoint simulations contract for v0.9",
-            type: "string",
+            alias: "c",
             require: false
         },
         "binary-search-tolerance-delta": {
@@ -345,6 +292,13 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
             require: true,
             default: "110"
         },
+        "paymaster-gas-limit-multiplier": {
+            description:
+                "Amount to multiply the paymaster gas limits fetched from simulations",
+            type: "string",
+            require: true,
+            default: "110"
+        },
         "simulation-call-gas-limit": {
             description:
                 "UserOperation's callGasLimit used during gas estimation simulations",
@@ -383,70 +337,16 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
                 "Should the bundler split estimation simulations into smaller calls.",
             type: "boolean",
             default: false
-        },
-        "call-gas-limit-floor": {
-            description:
-                "Minimum callGasLimit to enforce when there are queued user operations",
-            type: "string",
-            require: false,
-            default: "50000"
-        }
-    }
-
-export const preVerificationGasOptions: CliCommandOptions<IPreVerificationGasArgsInput> =
-    {
-        "transaction-gas-stipend": {
-            description: "Intrinsic gas cost for a transaction",
-            type: "string",
-            require: false,
-            default: "21000"
-        },
-        "calldata-zero-byte-gas": {
-            description: "Gas cost per zero byte of calldata",
-            type: "string",
-            require: false,
-            default: "4"
-        },
-        "calldata-non-zero-byte-gas": {
-            description: "Gas cost per non-zero byte of calldata",
-            type: "string",
-            require: false,
-            default: "16"
-        },
-        "eip7623-floor-per-token-gas": {
-            description: "EIP-7623 floor gas cost per token",
-            type: "string",
-            require: false,
-            default: "10"
-        },
-        "eip7623-tokens-per-nonzero-byte": {
-            description:
-                "Number of tokens counted per non-zero byte for EIP-7623",
-            type: "string",
-            require: false,
-            default: "4"
         }
     }
 
 export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
-    "max-bundle-count": {
-        description:
-            "Maximum number of bundles when calling mempool's process function",
-        type: "number",
-        require: false
-    },
     "resubmit-stuck-timeout": {
         description:
             "Amount of time before retrying a failed userOperation (in ms)",
         type: "number",
         require: true,
         default: 10_000
-    },
-    "max-resubmits": {
-        description:
-            "Maximum number of times to resubmit a userOperation before dropping it (optional, no limit if not set)",
-        type: "number",
-        require: false
     },
     "resubmit-multiplier-ceiling": {
         description:
@@ -462,16 +362,49 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "4337"
     },
+    "refilling-wallets": {
+        description: "Enable refilling wallets",
+        type: "boolean",
+        require: false,
+        default: true
+    },
     "executor-gas-multiplier": {
         description: "Amount to scale the gas estimations used for bundling",
         type: "string",
         default: "100"
+    },
+    "no-profit-bundling": {
+        description:
+            "Bundle tx such that all beneficiary fees are spent on gas fees",
+        type: "boolean",
+        default: false
+    },
+    "refill-helper-contract": {
+        description: "Address of the Executor refill helper contract",
+        type: "string",
+        require: false
     },
     "executor-private-keys": {
         description: "Private keys of the executor accounts split by commas",
         type: "string",
         alias: "x",
         require: true
+    },
+    "utility-private-key": {
+        description: "Private key of the utility account",
+        type: "string",
+        alias: "u",
+        require: false
+    },
+    "utility-wallet-monitor": {
+        description: "Either to enable utility wallet monitor or not",
+        type: "boolean",
+        default: true
+    },
+    "utility-wallet-monitor-interval": {
+        description: "Interval for checking utility wallet balance",
+        type: "number",
+        default: 15 * 1000 // 15 seconds
     },
     "max-executors": {
         description:
@@ -483,6 +416,12 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         description:
             "Minimum balance required for each executor account (below which the utility account will refill)",
         type: "string"
+    },
+    "executor-refill-interval": {
+        description: "Interval to refill the signer balance (seconds)",
+        type: "number",
+        require: true,
+        default: 60 * 20
     },
     "transaction-underpriced-multiplier": {
         description:
@@ -505,48 +444,19 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "10"
     },
+    "arbitrum-gas-bid-multiplier": {
+        description:
+            "Multiplier for gas bid on Arbitrum networks to account for baseFee fluctuations",
+        type: "string",
+        require: false,
+        default: "5"
+    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",
         type: "number",
         require: false,
         default: 3
-    },
-    "private-endpoint-submission-attempts": {
-        description:
-            "Number of submission attempts to use private RPC endpoint before switching to public",
-        type: "number",
-        require: false,
-        default: 3
-    },
-    "gas-price-replacement-threshold": {
-        description:
-            "Percentage threshold for gas price increase before replacing a pending transaction (e.g. 10 means replace only if gas price increased by more than 10%)",
-        type: "string",
-        require: false,
-        default: "10"
-    }
-}
-
-export const utilityOptions: CliCommandOptions<IUtilityArgsInput> = {
-    "utility-private-key": {
-        description: "Private key of the utility account",
-        type: "string",
-        alias: "u",
-        require: false
-    },
-    "refilling-wallets": {
-        description:
-            "Enable refilling executor wallets using the utility wallet",
-        type: "boolean",
-        require: false,
-        default: true
-    },
-    "executor-refill-interval": {
-        description: "Interval to refill the signer balance (seconds)",
-        type: "number",
-        require: true,
-        default: 60 * 20
     }
 }
 
@@ -562,10 +472,7 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
                 "arbitrum",
                 "hedera",
                 "mantle",
-                "etherlink",
-                "monad",
-                "citrea",
-                "tempo"
+                "etherlink"
             ],
             default: "default"
         },
@@ -626,45 +533,12 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             type: "string",
             require: false
         },
-        "static-max-priority-fee-per-gas": {
-            description:
-                "Static maxPriorityFeePerGas value (in gwei) instead of RPC estimation",
-            type: "string",
-            require: false
-        },
         "supports-eip7623": {
             description:
                 "Whether the chain supports EIP-7623 (Increase calldata cost to reduce maximum block size)",
             type: "boolean",
             require: false,
             default: false
-        },
-        "arbitrum-base-fee-multiplier": {
-            description:
-                "Multiplier for gas bids on Arbitrum networks to account for baseFee fluctuations",
-            type: "string",
-            require: false,
-            default: "150"
-        },
-        "citrea-l1-diff-size": {
-            description:
-                "Static L1 diff size used for Citrea pre-verification gas calculation",
-            type: "string",
-            require: false,
-            default: "150"
-        },
-        "eip-7702-support": {
-            description:
-                "Whether the bundler supports EIP-7702 user operations",
-            type: "boolean",
-            require: false,
-            default: true
-        },
-        "chain-native-decimals": {
-            description: "Number of decimals for the chain's native currency",
-            type: "number",
-            require: false,
-            default: 18
         }
     }
 
@@ -745,6 +619,17 @@ export const rpcOptions: CliCommandOptions<IRpcArgsInput> = {
 }
 
 export const logOptions: CliCommandOptions<ILogArgsInput> = {
+    "redis-queue-endpoint": {
+        description: "redis queue endpoint",
+        type: "string",
+        require: false
+    },
+    "redis-event-manager-queue-name": {
+        description: "redis event manager queue name",
+        type: "string",
+        require: false,
+        default: "UserOperationStatusBullEventsQueue"
+    },
     json: {
         description: "Log in JSON format",
         type: "boolean",
@@ -849,12 +734,6 @@ export const debugOptions: CliCommandOptions<IDebugArgsInput> = {
         type: "boolean",
         require: true,
         default: true
-    },
-    "enable-cors": {
-        description: "Enable CORS for local bundler access",
-        type: "boolean",
-        require: true,
-        default: false
     }
 }
 

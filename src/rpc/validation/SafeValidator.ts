@@ -1,30 +1,35 @@
 import type { SenderManager } from "@alto/executor"
 import type { GasPriceManager } from "@alto/handlers"
+import type {
+    InterfaceValidator,
+    UserOperationV06,
+    UserOperationV07,
+    ValidationResult,
+    ValidationResultV06,
+    ValidationResultV07,
+    ValidationResultWithAggregationV06,
+    ValidationResultWithAggregationV07
+} from "@alto/types"
 import {
     type Address,
     CodeHashGetterAbi,
     CodeHashGetterBytecode,
-    ERC7769Errors,
     EntryPointV06Abi,
-    type InterfaceValidator,
+    EntryPointV07Abi,
     type ReferencedCodeHashes,
     RpcError,
     type StakeInfo,
     type StorageMap,
     type UserOperation,
-    type UserOperation06,
-    type UserOperation07,
-    type ValidationResult,
-    type ValidationResult06,
-    type ValidationResult07,
+    ValidationErrors,
+    type ValidationResultWithAggregation,
     pimlicoSimulationsAbi
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import {
     getAddressFromInitCodeOrPaymasterAndData,
     getAuthorizationStateOverrides,
-    getEntryPointSimulationsAddress,
-    getViemEntryPointVersion,
+    isVersion08,
     jsonStringifyWithBigint,
     toPackedUserOp
 } from "@alto/utils"
@@ -32,8 +37,10 @@ import {
     type ExecutionRevertedError,
     type Hex,
     decodeErrorResult,
+    decodeFunctionResult,
     encodeDeployData,
     encodeFunctionData,
+    parseAbi,
     zeroAddress
 } from "viem"
 import type { AltoConfig } from "../../createConfig"
@@ -46,12 +53,13 @@ import { tracerResultParserV06 } from "./TracerResultParserV06"
 import { tracerResultParserV07 } from "./TracerResultParserV07"
 import { UnsafeValidator } from "./UnsafeValidator"
 import { debug_traceCall } from "./tracer"
+import { simulationErrors } from "../estimation/utils"
 
 export class SafeValidator
     extends UnsafeValidator
     implements InterfaceValidator
 {
-    private readonly senderManager: SenderManager
+    private senderManager: SenderManager
 
     constructor({
         config,
@@ -78,7 +86,7 @@ export class SafeValidator
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult & {
+        (ValidationResult | ValidationResultWithAggregation) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -131,13 +139,13 @@ export class SafeValidator
         }
     }
 
-    async getValidationResult07(args: {
-        userOp: UserOperation07
+    async getValidationResultV07(args: {
+        userOp: UserOperationV07
         queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult07 & {
+        (ValidationResultV07 | ValidationResultWithAggregationV07) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -148,14 +156,14 @@ export class SafeValidator
             if (hash !== codeHashes.hash) {
                 throw new RpcError(
                     "code hashes mismatch",
-                    ERC7769Errors.OpcodeValidation
+                    ValidationErrors.OpcodeValidation
                 )
             }
         }
 
         const [res, tracerResult] = await this.getValidationResultWithTracerV07(
             userOp,
-            queuedUserOps as UserOperation07[],
+            queuedUserOps as UserOperationV07[],
             entryPoint
         )
 
@@ -179,14 +187,14 @@ export class SafeValidator
         if (res.returnInfo.accountSigFailed) {
             throw new RpcError(
                 "Invalid UserOp signature",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
         if (res.returnInfo.paymasterSigFailed) {
             throw new RpcError(
                 "Invalid UserOp paymasterData",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
@@ -197,12 +205,12 @@ export class SafeValidator
         }
     }
 
-    async getValidationResult06(args: {
-        userOp: UserOperation06
+    async getValidationResultV06(args: {
+        userOp: UserOperationV06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult06 & {
+        (ValidationResultV06 | ValidationResultWithAggregationV06) & {
             referencedContracts?: ReferencedCodeHashes
             storageMap: StorageMap
         }
@@ -213,7 +221,7 @@ export class SafeValidator
             if (hash !== codeHashes.hash) {
                 throw new RpcError(
                     "code hashes mismatch",
-                    ERC7769Errors.OpcodeValidation
+                    ValidationErrors.OpcodeValidation
                 )
             }
         }
@@ -248,7 +256,7 @@ export class SafeValidator
         if (validationResult.returnInfo.sigFailed) {
             throw new RpcError(
                 "Invalid UserOp signature or paymaster signature",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
@@ -263,21 +271,24 @@ export class SafeValidator
         if (validationResult.returnInfo.validAfter > now - 5) {
             throw new RpcError(
                 "User operation is not valid yet",
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 
         if (validationResult.returnInfo.validUntil < now + 30) {
-            throw new RpcError("expires too soon", ERC7769Errors.ExpiresShortly)
+            throw new RpcError(
+                "expires too soon",
+                ValidationErrors.ExpiresShortly
+            )
         }
 
         return validationResult
     }
 
     async getValidationResultWithTracerV06(
-        userOp: UserOperation06,
+        userOp: UserOperationV06,
         entryPoint: Address
-    ): Promise<[ValidationResult06, BundlerTracerResult]> {
+    ): Promise<[ValidationResultV06, BundlerTracerResult]> {
         const stateOverrides = getAuthorizationStateOverrides({
             userOps: [userOp]
         })
@@ -338,10 +349,10 @@ export class SafeValidator
     }
 
     parseErrorResultV06(
-        userOp: UserOperation06,
+        userOp: UserOperationV06,
         // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
         errorResult: { errorName: string; errorArgs: any }
-    ): ValidationResult {
+    ): ValidationResult | ValidationResultWithAggregation {
         if (!errorResult?.errorName?.startsWith("ValidationResult")) {
             // parse it as FailedOp
             // if its FailedOp, then we have the paymaster param... otherwise its an Error(string)
@@ -357,12 +368,12 @@ export class SafeValidator
             if (paymaster == null) {
                 throw new RpcError(
                     `account validation failed: ${msg}`,
-                    ERC7769Errors.SimulateValidation
+                    ValidationErrors.SimulateValidation
                 )
             }
             throw new RpcError(
                 `paymaster validation failed: ${msg}`,
-                ERC7769Errors.SimulatePaymasterValidation,
+                ValidationErrors.SimulatePaymasterValidation,
                 {
                     paymaster
                 }
@@ -422,19 +433,21 @@ export class SafeValidator
     }
 
     async getValidationResultWithTracerV07(
-        userOp: UserOperation07,
-        queuedUserOps: UserOperation07[],
+        userOp: UserOperationV07,
+        queuedUserOps: UserOperationV07[],
         entryPoint: Address
-    ): Promise<[ValidationResult07, BundlerTracerResult]> {
+    ): Promise<[ValidationResultV07, BundlerTracerResult]> {
         const packedUserOp = toPackedUserOp(userOp)
         const packedQueuedUserOps = queuedUserOps.map((uop) =>
             toPackedUserOp(uop)
         )
 
-        const entryPointSimulationsAddress = getEntryPointSimulationsAddress({
-            version: getViemEntryPointVersion(userOp, entryPoint),
-            config: this.config
-        })
+        const isV8 = isVersion08(userOp, entryPoint)
+
+        const entryPointSimulationsAddress = isV8
+            ? this.config.entrypointSimulationContractV8
+            : this.config.entrypointSimulationContractV7
+
         const pimlicoSimulationsAddress = this.config.pimlicoSimulationContract
 
         if (!entryPointSimulationsAddress || !pimlicoSimulationsAddress) {
@@ -481,28 +494,67 @@ export class SafeValidator
         }
         const resultData = lastResult.data as Hex
 
-        // Decode the validation result from the revert data
-        const { errorName, args } = decodeErrorResult({
-            abi: pimlicoSimulationsAbi,
+        // Some generated ABIs may omit custom errors at runtime.
+        // Add DelegateAndRevert explicitly to guarantee decoding works.
+        const delegateAndRevertAbi = parseAbi([
+            "error DelegateAndRevert(bool success, bytes ret)"
+        ])
+        const combinedAbi = [
+            ...pimlicoSimulationsAbi,
+            ...EntryPointV07Abi,
+            ...delegateAndRevertAbi
+        ] as const
+
+        const top = decodeErrorResult({
+            abi: combinedAbi,
             data: resultData
         })
 
+        let errorName: string
+        let args: readonly unknown[]
+
+        if (top.errorName === "DelegateAndRevert") {
+            const innerSuccess = top.args[0] as boolean
+            const innerData = top.args[1] as Hex
+
+            if (innerSuccess) {
+                const fnResult = decodeFunctionResult({
+                    abi: pimlicoSimulationsAbi,
+                    functionName: "simulateValidation",
+                    data: innerData
+                })
+                errorName = "ValidationResult"
+                args = [fnResult]
+            } else {
+                const innerAbi = [...simulationErrors, ...EntryPointV07Abi] as const
+                const inner = decodeErrorResult({
+                    abi: innerAbi,
+                    data: innerData
+                })
+                errorName = inner.errorName
+                args = inner.args
+            }
+        } else {
+            errorName = top.errorName
+            args = top.args
+        }
+
         if (errorName !== "ValidationResult") {
-            let errorCode = ERC7769Errors.SimulateValidation
+            let errorCode = ValidationErrors.SimulateValidation
             const errorMessage = errorName || "Unknown validation error"
 
             if (errorMessage.includes("AA24")) {
-                errorCode = ERC7769Errors.InvalidSignature
+                errorCode = ValidationErrors.InvalidSignature
             }
 
             if (errorMessage.includes("AA31")) {
-                errorCode = ERC7769Errors.PaymasterDepositTooLow
+                errorCode = ValidationErrors.PaymasterDepositTooLow
             }
 
             throw new RpcError(errorMessage, errorCode)
         }
 
-        const validationResult = args[0] as ValidationResult07
+        const validationResult = args[0] as ValidationResultWithAggregationV07
 
         const mergedValidation = this.mergeValidationDataValues(
             validationResult.returnInfo.accountValidationData,
@@ -544,14 +596,14 @@ export class SafeValidator
         if (res.returnInfo.accountSigFailed) {
             throw new RpcError(
                 "Invalid UserOp signature",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
         if (res.returnInfo.paymasterSigFailed) {
             throw new RpcError(
                 "Invalid UserOp paymasterData",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
@@ -560,7 +612,7 @@ export class SafeValidator
         if (res.returnInfo.validAfter > now - 5) {
             throw new RpcError(
                 `User operation is not valid yet, validAfter=${res.returnInfo.validAfter}, now=${now}`,
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 
@@ -570,7 +622,7 @@ export class SafeValidator
         ) {
             throw new RpcError(
                 `UserOperation expires too soon, validUntil=${res.returnInfo.validUntil}, now=${now}`,
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 

@@ -1,15 +1,17 @@
 import {
-    ERC7769Errors,
     RpcError,
     type UserOpInfo,
     type UserOperationBundle,
+    ValidationErrors,
     pimlicoSendUserOperationNowSchema
 } from "@alto/types"
 import {
     getUserOpHash,
-    getViemEntryPointVersion,
+    isVersion07,
+    isVersion08,
     parseUserOpReceipt
 } from "@alto/utils"
+import type { EntryPointVersion } from "viem/account-abstraction"
 import { createMethodHandler } from "../createMethodHandler"
 
 export const pimlicoSendUserOperationNowHandler = createMethodHandler({
@@ -19,45 +21,49 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
         if (!rpcHandler.config.enableInstantBundlingEndpoint) {
             throw new RpcError(
                 "pimlico_sendUserOperationNow endpoint is not enabled",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
         const [userOp, entryPoint] = params
         rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
-        // Validate userOp fields (sync - fail fast before expensive async checks)
-        const [fieldsValid, fieldsError] = rpcHandler.validateUserOpFields({
-            userOp,
-            entryPoint
-        })
-        if (!fieldsValid) {
-            throw new RpcError(fieldsError, ERC7769Errors.InvalidFields)
-        }
-
-        const userOpHash = getUserOpHash({
+        const opHash = await getUserOpHash({
             userOp,
             entryPointAddress: entryPoint,
-            chainId: rpcHandler.config.chainId
+            chainId: rpcHandler.config.chainId,
+            publicClient: rpcHandler.config.publicClient
         })
 
-        // Validate gas price (async)
-        const [gasPriceValid, gasPriceError] =
-            await rpcHandler.validateUserOpGasPrice({ userOp, apiVersion })
-        if (!gasPriceValid) {
-            throw new RpcError(gasPriceError, ERC7769Errors.InvalidFields)
+        const [preMempoolValid, preMempoolError] =
+            await rpcHandler.preMempoolChecks(userOp, apiVersion)
+
+        if (!preMempoolValid) {
+            throw new RpcError(preMempoolError)
         }
 
         // Prepare bundle
         const userOpInfo: UserOpInfo = {
             userOp,
-            userOpHash,
+            userOpHash: await getUserOpHash({
+                userOp,
+                entryPointAddress: entryPoint,
+                chainId: rpcHandler.config.chainId,
+                publicClient: rpcHandler.config.publicClient
+            }),
             addedToMempool: Date.now(),
             submissionAttempts: 0
         }
 
-        // Derive version.
-        const version = getViemEntryPointVersion(userOp, entryPoint)
+        // Derive version
+        let version: EntryPointVersion
+        if (isVersion08(userOp, entryPoint)) {
+            version = "0.8"
+        } else if (isVersion07(userOp)) {
+            version = "0.7"
+        } else {
+            version = "0.6"
+        }
 
         const bundle: UserOperationBundle = {
             entryPoint,
@@ -65,17 +71,14 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
             version,
             submissionAttempts: 0
         }
-        rpcHandler.mempool.store.addProcessing({
-            entryPoint,
-            userOpInfos: [userOpInfo]
-        })
+        rpcHandler.mempool.store.addProcessing({ entryPoint, userOpInfo })
         const result =
             await rpcHandler.executorManager.sendBundleToExecutor(bundle)
 
         if (!result) {
             throw new RpcError(
                 "unhandled error during bundle submission",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -86,6 +89,6 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
                 pollingInterval: 100
             })
 
-        return parseUserOpReceipt(userOpHash, receipt)
+        return parseUserOpReceipt(opHash, receipt)
     }
 })

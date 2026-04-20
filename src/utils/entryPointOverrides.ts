@@ -18,9 +18,6 @@ import entryPointOverride07 from "../contracts/EntryPointFilterOpsOverride.sol/E
 import entryPointOverride08 from "../contracts/EntryPointFilterOpsOverride.sol/EntryPointFilterOpsOverride08.json" with {
     type: "json"
 }
-import entryPointOverride09 from "../contracts/EntryPointFilterOpsOverride.sol/EntryPointFilterOpsOverride09.json" with {
-    type: "json"
-}
 
 export const getSenderCreatorOverride = (entryPoint: Address) => {
     const slot = keccak256(toHex("SENDER_CREATOR"))
@@ -48,19 +45,11 @@ export const getFilterOpsStateOverride = ({
     baseFeePerGas: bigint
 }): StateOverride => {
     const senderCreatorOverride = getSenderCreatorOverride(entryPoint)
-    const baseFeeSlot = keccak256(toHex("BLOCK_BASE_FEE_PER_GAS"))
-    const baseFeeValue = toHex(baseFeePerGas, { size: 32 })
-
-    // Get current timestamp in seconds (block.timestamp is in seconds)
-    const timestampSlot = keccak256(toHex("BLOCK_TIMESTAMP"))
-    const timestampValue = toHex(Math.floor(Date.now() / 1000), { size: 32 })
+    const slot = keccak256(toHex("BLOCK_BASE_FEE_PER_GAS"))
+    const value = toHex(baseFeePerGas, { size: 32 })
 
     let code: Hex
     switch (version) {
-        case "0.9": {
-            code = entryPointOverride09.deployedBytecode.object as Hex
-            break
-        }
         case "0.8": {
             code = entryPointOverride08.deployedBytecode.object as Hex
             break
@@ -84,12 +73,8 @@ export const getFilterOpsStateOverride = ({
                     value: senderCreatorOverride.value
                 },
                 {
-                    slot: baseFeeSlot,
-                    value: baseFeeValue
-                },
-                {
-                    slot: timestampSlot,
-                    value: timestampValue
+                    slot,
+                    value
                 }
             ]
         }

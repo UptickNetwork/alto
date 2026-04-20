@@ -3,99 +3,92 @@ import {
     RpcError,
     gasStationResult
 } from "@alto/types"
-import {
-    type Logger,
-    maxBigInt,
-    minBigInt,
-    scaleBigIntByPercent
-} from "@alto/utils"
+import { type Logger, maxBigInt, minBigInt } from "@alto/utils"
 import * as sentry from "@sentry/node"
-import Redis from "ioredis"
-import type { Chain, PublicClient } from "viem"
+import { type PublicClient, parseGwei } from "viem"
 import { polygon } from "viem/chains"
 import type { AltoConfig } from "../createConfig"
 import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 import { ArbitrumManager } from "./arbitrumGasPriceManager"
-import { CitreaManager } from "./citreaManager"
 import { MantleManager } from "./mantleGasPriceManager"
 import { OptimismManager } from "./optimismManager"
 
 export class GasPriceManager {
     private readonly config: AltoConfig
-    private readonly baseFeePerGasQueue: MinMaxQueue
-    private readonly maxFeePerGasQueue: MinMaxQueue
-    private readonly maxPriorityFeePerGasQueue: MinMaxQueue
-    private readonly logger: Logger
-    private readonly redisRefreshGuard: { redis: Redis; key: string } | null
+    private baseFeePerGasQueue: MinMaxQueue
+    private maxFeePerGasQueue: MinMaxQueue
+    private maxPriorityFeePerGasQueue: MinMaxQueue
+    private logger: Logger
 
-    public readonly arbitrumManager: ArbitrumManager
-    public readonly citreaManager: CitreaManager
-    public readonly mantleManager: MantleManager
-    public readonly optimismManager: OptimismManager
+    public arbitrumManager: ArbitrumManager
+    public mantleManager: MantleManager
+    public optimismManager: OptimismManager
 
     constructor(config: AltoConfig) {
         this.config = config
         this.logger = config.getLogger(
             { module: "gas_price_manager" },
             {
-                level: config.logLevel
+                level: config.publicClientLogLevel || config.logLevel
             }
         )
 
-        if (config.enableHorizontalScaling && config.redisEndpoint) {
-            this.redisRefreshGuard = {
-                redis: new Redis(config.redisEndpoint),
-                key: `${config.redisKeyPrefix}:${config.chainId}:gas-price-update-lock`
-            }
-        } else {
-            this.redisRefreshGuard = null
-        }
-
         this.baseFeePerGasQueue = createMinMaxQueue({
             config,
-            queueName: "base-fee-per-gas-queue"
+            keyPrefix: "base-fee-per-gas-queue"
         })
         this.maxFeePerGasQueue = createMinMaxQueue({
             config,
-            queueName: "max-fee-per-gas-queue"
+            keyPrefix: "max-fee-per-gas-queue"
         })
         this.maxPriorityFeePerGasQueue = createMinMaxQueue({
             config,
-            queueName: "max-priority-fee-per-gas-queue"
+            keyPrefix: "max-priority-fee-per-gas-queue"
         })
 
         // Periodically update gas prices if specified
         if (this.config.gasPriceRefreshInterval > 0) {
-            this.scheduleRefresh(0)
+            setInterval(async () => {
+                try {
+                    if (this.config.legacyTransactions === false) {
+                        await this.updateBaseFee()
+                    }
+
+                    await this.tryUpdateGasPrice()
+                } catch (error) {
+                    this.logger.error(
+                        { error },
+                        "Error updating gas prices in interval"
+                    )
+                    sentry.captureException(error)
+                }
+            }, this.config.gasPriceRefreshInterval * 1000)
         }
 
         this.arbitrumManager = new ArbitrumManager({ config })
-        this.citreaManager = new CitreaManager({ config })
         this.mantleManager = new MantleManager({ config })
         this.optimismManager = new OptimismManager({ config })
     }
 
     public async init() {
-        if (this.config.dynamicGasPrice) {
-            this.logger.info(
-                {
-                    lookbackBlocks: this.config.dynamicGasPriceLookbackBlocks,
-                    targetInclusionBlocks:
-                        this.config.dynamicGasPriceTargetInclusionBlocks
-                },
-                "using dynamic gas pricing"
-            )
-        }
-
         try {
             await Promise.all([
                 this.tryUpdateGasPrice(),
                 this.config.legacyTransactions === false
-                    ? this.tryUpdateBaseFee()
+                    ? this.updateBaseFee()
                     : Promise.resolve()
             ])
-        } catch (err) {
-            this.logger.error({ err }, "Error during gas price initialization")
+        } catch (error) {
+            this.logger.error(error, "Error during gas price initialization")
+        }
+    }
+
+    private getDefaultGasFee(chainId: number): bigint {
+        switch (chainId) {
+            case polygon.id:
+                return parseGwei("31")
+            default:
+                return 0n
         }
     }
 
@@ -109,7 +102,7 @@ export class GasPriceManager {
             return parsedData.fast
         } catch (e) {
             this.logger.error(
-                { err: e },
+                { error: e },
                 "failed to get gas price from gas station, using default"
             )
             return null
@@ -119,40 +112,45 @@ export class GasPriceManager {
     private bumpTheGasPrice(
         gasPriceParameters: GasPriceParameters
     ): GasPriceParameters {
-        let [maxFeePerGas, maxPriorityFeePerGas] = [
+        const bumpAmount = this.config.gasPriceBump
+
+        const maxPriorityFeePerGas = maxBigInt(
+            gasPriceParameters.maxPriorityFeePerGas,
+            this.getDefaultGasFee(this.config.chainId)
+        )
+        const maxFeePerGas = maxBigInt(
             gasPriceParameters.maxFeePerGas,
-            gasPriceParameters.maxPriorityFeePerGas
-        ]
-
-        // Apply bump percentage
-        maxPriorityFeePerGas = scaleBigIntByPercent(
-            maxPriorityFeePerGas,
-            this.config.gasPriceBump
-        )
-        maxFeePerGas = scaleBigIntByPercent(
-            maxFeePerGas,
-            this.config.gasPriceBump
-        )
-
-        // Apply floor values if configured
-        if (this.config.floorMaxPriorityFeePerGas) {
-            maxPriorityFeePerGas = maxBigInt(
-                this.config.floorMaxPriorityFeePerGas,
-                maxPriorityFeePerGas
-            )
-        }
-        if (this.config.floorMaxFeePerGas) {
-            maxFeePerGas = maxBigInt(
-                this.config.floorMaxFeePerGas,
-                maxFeePerGas
-            )
-        }
-
-        return {
-            // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
-            maxFeePerGas: maxBigInt(maxFeePerGas, maxPriorityFeePerGas),
             maxPriorityFeePerGas
+        )
+
+        const result = {
+            maxFeePerGas: (maxFeePerGas * bumpAmount) / 100n,
+            maxPriorityFeePerGas: (maxPriorityFeePerGas * bumpAmount) / 100n
         }
+
+        if (
+            this.config.floorMaxFeePerGas ||
+            this.config.floorMaxPriorityFeePerGas
+        ) {
+            const maxFeePerGas = this.config.floorMaxFeePerGas
+                ? maxBigInt(this.config.floorMaxFeePerGas, result.maxFeePerGas)
+                : result.maxFeePerGas
+
+            const maxPriorityFeePerGas = this.config.floorMaxPriorityFeePerGas
+                ? maxBigInt(
+                      this.config.floorMaxPriorityFeePerGas,
+                      result.maxPriorityFeePerGas
+                  )
+                : result.maxPriorityFeePerGas
+
+            return {
+                // Ensure that maxFeePerGas is always greater or equal than maxPriorityFeePerGas
+                maxFeePerGas: maxBigInt(maxFeePerGas, maxPriorityFeePerGas),
+                maxPriorityFeePerGas
+            }
+        }
+
+        return result
     }
 
     private async getFallBackMaxPriorityFeePerGas(
@@ -185,8 +183,8 @@ export class GasPriceManager {
         } catch (e) {
             sentry.captureException(e)
             this.logger.error(
-                { err: e },
-                "failed to fetch legacy gasPrices from estimateFeesPerGas"
+                "failed to fetch legacy gasPrices from estimateFeesPerGas",
+                { error: e }
             )
             gasPrice = undefined
         }
@@ -212,33 +210,17 @@ export class GasPriceManager {
         let maxFeePerGas: bigint | undefined
         let maxPriorityFeePerGas: bigint | undefined
 
-        const { publicClient, staticMaxPriorityFeePerGas } = this.config
-
         try {
-            let chain: Chain | undefined
-
-            // If staticMaxPriorityFeePerGas is set, use it as a static value instead of RPC estimation.
-            if (staticMaxPriorityFeePerGas) {
-                chain = {
-                    ...publicClient.chain,
-                    fees: {
-                        ...publicClient.chain.fees,
-                        maxPriorityFeePerGas: staticMaxPriorityFeePerGas
-                    }
-                }
-            }
-
-            const fees = await publicClient.estimateFeesPerGas({
-                chain
+            const fees = await this.config.publicClient.estimateFeesPerGas({
+                chain: this.config.publicClient.chain
             })
-
             maxFeePerGas = fees.maxFeePerGas
             maxPriorityFeePerGas = fees.maxPriorityFeePerGas
         } catch (e) {
             sentry.captureException(e)
             this.logger.error(
-                { err: e },
-                "failed to fetch eip-1559 gasPrices from estimateFeesPerGas"
+                "failed to fetch eip-1559 gasPrices from estimateFeesPerGas",
+                { error: e }
             )
             maxFeePerGas = undefined
             maxPriorityFeePerGas = undefined
@@ -251,7 +233,7 @@ export class GasPriceManager {
             try {
                 maxPriorityFeePerGas =
                     await this.getFallBackMaxPriorityFeePerGas(
-                        publicClient,
+                        this.config.publicClient,
                         maxFeePerGas ?? 0n
                     )
             } catch (e) {
@@ -265,7 +247,8 @@ export class GasPriceManager {
             this.logger.warn("maxFeePerGas is undefined, using fallback value")
             try {
                 maxFeePerGas =
-                    (await publicClient.getGasPrice()) + maxPriorityFeePerGas
+                    (await this.config.publicClient.getGasPrice()) +
+                    maxPriorityFeePerGas
             } catch (e) {
                 this.logger.error("failed to get fallback maxFeePerGas")
                 sentry.captureException(e)
@@ -280,204 +263,64 @@ export class GasPriceManager {
         return { maxFeePerGas, maxPriorityFeePerGas }
     }
 
-    // Estimates gas price using eth_feeHistory to get previous baseFee/gasUsedRatio/maxPriorityFeePerGas.
-    // Selects a priority fee percentile based on average block fullness.
-    // When forExecutor is true, computes a worst-case maxFeePerGas for N-block inclusion guarantee.
-    // When forExecutor is false, uses baseFee * 1.2 (same as viem default) and avoids setting a too high maxFeePerGas.
-    private async estimateDynamicGasPrice({
-        forExecutor
-    }: {
-        forExecutor: boolean
-    }): Promise<GasPriceParameters> {
-        try {
-            const {
-                publicClient,
-                dynamicGasPriceLookbackBlocks,
-                dynamicGasPriceTargetInclusionBlocks
-            } = this.config
-
-            const blockCount = dynamicGasPriceLookbackBlocks
-            const targetInclusionBlocks = dynamicGasPriceTargetInclusionBlocks
-
-            const rewardPercentiles = [40, 50, 60, 70]
-
-            const feeHistory = await publicClient.getFeeHistory({
-                blockCount,
-                rewardPercentiles,
-                blockTag: "latest"
-            })
-
-            // Compute average block fullness from gasUsedRatio
-            const avgFullness =
-                feeHistory.gasUsedRatio.reduce((acc, ratio) => acc + ratio, 0) /
-                feeHistory.gasUsedRatio.length
-
-            // Select percentile index based on congestion level
-            let percentileIndex: number
-            if (avgFullness > 0.9) {
-                percentileIndex = 3 // 70th percentile — high congestion
-            } else if (avgFullness > 0.7) {
-                percentileIndex = 2 // 60th percentile
-            } else if (avgFullness > 0.5) {
-                percentileIndex = 1 // 50th percentile
-            } else {
-                percentileIndex = 0 // 40th percentile — low congestion
-            }
-
-            // Compute maxPriorityFeePerGas as median of rewards at selected percentile
-            let maxPriorityFeePerGas: bigint
-            if (
-                feeHistory.reward &&
-                feeHistory.reward.length > 0 &&
-                feeHistory.reward[0].length > percentileIndex
-            ) {
-                const sorted = feeHistory.reward
-                    .map((blockRewards) => blockRewards[percentileIndex])
-                    .sort((a, b) => {
-                        if (a < b) return -1
-                        if (a > b) return 1
-                        return 0
-                    })
-
-                const mid = Math.floor(sorted.length / 2)
-                maxPriorityFeePerGas =
-                    sorted.length % 2 === 0
-                        ? (sorted[mid - 1] + sorted[mid]) / 2n
-                        : sorted[mid]
-            } else {
-                throw new Error(
-                    "dynamic gas price: reward data missing from feeHistory"
-                )
-            }
-
-            const baseFees = feeHistory.baseFeePerGas
-            const latestBaseFee = baseFees[baseFees.length - 1]
-
-            let maxFeePerGas: bigint
-
-            if (forExecutor) {
-                // Compute worst-case baseFee for N-block inclusion guarantee.
-                // EIP-1559 formula:
-                // base_fee_per_gas_delta = parent_base_fee_per_gas * gas_used_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR
-                // With BASE_FEE_MAX_CHANGE_DENOMINATOR=8 and ELASTICITY_MULTIPLIER=2,
-                // a 100% full block increases base fee by 1/8 = 12.5%.
-                // worstCaseBaseFee = currentBaseFee * (1125/1000)^targetInclusionBlocks
-                //
-                // Reference: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1559.md?plain=1#L189
-                let worstCaseBaseFee = latestBaseFee
-
-                for (let i = 0; i < targetInclusionBlocks; i++) {
-                    const delta = maxBigInt(worstCaseBaseFee / 8n, 1n)
-                    worstCaseBaseFee = worstCaseBaseFee + delta
-                }
-
-                maxFeePerGas = worstCaseBaseFee + maxPriorityFeePerGas
-            } else {
-                // For userOp estimation, use baseFee * 1.2 (same as viem default).
-                // This avoids returning a overly inflated maxFeePerGas.
-                const scaledBaseFee = scaleBigIntByPercent(latestBaseFee, 120n)
-                maxFeePerGas = scaledBaseFee + maxPriorityFeePerGas
-            }
-
-            return { maxFeePerGas, maxPriorityFeePerGas }
-        } catch (err) {
-            this.logger.error(
-                { err },
-                "dynamic gas price estimation failed, falling back to estimateGasPrice"
-            )
-            sentry.captureException(err)
-            return await this.estimateGasPrice()
-        }
-    }
-
     // This method throws if it can't get a valid RPC response.
-    private async innerGetGasPrice({
-        forExecutor
-    }: {
-        forExecutor: boolean
-    }): Promise<GasPriceParameters> {
+    private async innerGetGasPrice(): Promise<GasPriceParameters> {
+        let maxFeePerGas = 0n
+        let maxPriorityFeePerGas = 0n
+
         if (this.config.chainId === polygon.id) {
             const polygonEstimate = await this.getPolygonGasPriceParameters()
             if (polygonEstimate) {
-                return this.bumpTheGasPrice(polygonEstimate)
+                const gasPrice = this.bumpTheGasPrice({
+                    maxFeePerGas: polygonEstimate.maxFeePerGas,
+                    maxPriorityFeePerGas: polygonEstimate.maxPriorityFeePerGas
+                })
+
+                return {
+                    maxFeePerGas: maxBigInt(
+                        gasPrice.maxFeePerGas,
+                        maxFeePerGas
+                    ),
+                    maxPriorityFeePerGas: maxBigInt(
+                        gasPrice.maxPriorityFeePerGas,
+                        maxPriorityFeePerGas
+                    )
+                }
             }
         }
 
         if (this.config.legacyTransactions) {
-            const legacyGasPrice = await this.getLegacyTransactionGasPrice()
-            return this.bumpTheGasPrice(legacyGasPrice)
-        }
-
-        const estimatedGasPrice = this.config.dynamicGasPrice
-            ? await this.estimateDynamicGasPrice({ forExecutor })
-            : await this.estimateGasPrice()
-        return this.bumpTheGasPrice(estimatedGasPrice)
-    }
-
-    private scheduleRefresh(delayMs: number): void {
-        setTimeout(async () => {
-            const nextDelayMs = await this.refreshGasPrices()
-            this.scheduleRefresh(nextDelayMs)
-        }, delayMs).unref()
-    }
-
-    // Returns the number of milliseconds to sleep before the next poll.
-    private async refreshGasPrices(): Promise<number> {
-        const refreshIntervalMs = this.config.gasPriceRefreshInterval * 1000
-
-        try {
-            // With horizontal scaling, use a Redis SET NX lock so only one instance
-            // makes RPC calls per refresh interval. Fail-open on Redis errors.
-            if (this.redisRefreshGuard) {
-                const acquired = await this.redisRefreshGuard.redis
-                    .set(
-                        this.redisRefreshGuard.key,
-                        "1",
-                        "PX",
-                        refreshIntervalMs,
-                        "NX"
-                    )
-                    .catch((err: unknown) => {
-                        this.logger.warn(
-                            { err },
-                            "Redis lock check failed, proceeding with update"
-                        )
-                        return "OK"
-                    })
-
-                if (acquired !== "OK") {
-                    // Another instance holds the lock — return remaining TTL
-                    // so that the next call to refreshGasPrices can try again
-                    const pttl = await this.redisRefreshGuard.redis
-                        .pttl(this.redisRefreshGuard.key)
-                        .catch(() => refreshIntervalMs / 2)
-
-                    // PTTL returns -2 when the key already expired —
-                    // retry immediately with a 100ms floor to avoid tight-looping.
-                    if (pttl < 0) {
-                        return 100
-                    }
-
-                    return pttl
-                }
+            const gasPrice = this.bumpTheGasPrice(
+                await this.getLegacyTransactionGasPrice()
+            )
+            return {
+                maxFeePerGas: maxBigInt(gasPrice.maxFeePerGas, maxFeePerGas),
+                maxPriorityFeePerGas: maxBigInt(
+                    gasPrice.maxPriorityFeePerGas,
+                    maxPriorityFeePerGas
+                )
             }
-
-            await Promise.all([
-                this.tryUpdateGasPrice(),
-                this.config.legacyTransactions === false
-                    ? this.tryUpdateBaseFee()
-                    : Promise.resolve()
-            ])
-        } catch (err) {
-            this.logger.error({ err }, "Error updating gas prices in interval")
-            sentry.captureException(err)
         }
 
-        return refreshIntervalMs
+        const estimatedPrice = await this.estimateGasPrice()
+
+        maxFeePerGas = estimatedPrice.maxFeePerGas
+        maxPriorityFeePerGas = estimatedPrice.maxPriorityFeePerGas
+
+        const gasPrice = this.bumpTheGasPrice({
+            maxFeePerGas,
+            maxPriorityFeePerGas
+        })
+        return {
+            maxFeePerGas: maxBigInt(gasPrice.maxFeePerGas, maxFeePerGas),
+            maxPriorityFeePerGas: maxBigInt(
+                gasPrice.maxPriorityFeePerGas,
+                maxPriorityFeePerGas
+            )
+        }
     }
 
-    // This method throws if it can't get a valid RPC response.
-    private async tryUpdateBaseFee(): Promise<bigint> {
+    private async updateBaseFee(): Promise<bigint> {
         try {
             const latestBlock = await this.config.publicClient.getBlock()
             if (latestBlock.baseFeePerGas === null) {
@@ -490,7 +333,6 @@ export class GasPriceManager {
             return baseFee
         } catch (e) {
             this.logger.error(e, "Failed to update base fee")
-            sentry.captureException(e)
             throw e
         }
     }
@@ -502,29 +344,24 @@ export class GasPriceManager {
             }
 
             if (this.config.gasPriceRefreshInterval === 0) {
-                return await this.tryUpdateBaseFee()
+                return await this.updateBaseFee()
             }
 
             let baseFee = await this.baseFeePerGasQueue.getLatestValue()
             if (!baseFee) {
-                baseFee = await this.tryUpdateBaseFee()
+                baseFee = await this.updateBaseFee()
             }
 
             return baseFee
         } catch (e) {
-            this.logger.error(e, "Failed to get base fee, returning 0n")
-
-            // Save 0n to the queue for the missing baseFee case
-            this.baseFeePerGasQueue.saveValue(0n)
-            return 0n
+            this.logger.error(e, "Failed to get base fee")
+            throw new RpcError("Failed to get base fee")
         }
     }
 
     // This method throws if it can't get a valid RPC response.
     private async tryUpdateGasPrice(): Promise<GasPriceParameters> {
-        const gasPrice = await this.innerGetGasPrice({
-            forExecutor: false
-        })
+        const gasPrice = await this.innerGetGasPrice()
 
         this.maxFeePerGasQueue.saveValue(gasPrice.maxFeePerGas)
         this.maxPriorityFeePerGasQueue.saveValue(gasPrice.maxPriorityFeePerGas)
@@ -545,7 +382,7 @@ export class GasPriceManager {
                 return await this.tryUpdateGasPrice()
             } catch (e) {
                 this.logger.error(e, "No gas price available")
-                throw new Error("No gas price available")
+                throw new RpcError("No gas price available")
             }
         }
 
@@ -555,7 +392,7 @@ export class GasPriceManager {
         ])
 
         if (!maxFeePerGas || !maxPriorityFeePerGas) {
-            throw new Error("No gas price available")
+            throw new RpcError("No gas price available")
         }
 
         return {
@@ -565,29 +402,17 @@ export class GasPriceManager {
     }
 
     // This method throws if it can't get a valid RPC response.
-    public async tryGetNetworkGasPrice({
-        forExecutor
-    }: {
-        forExecutor: boolean
-    }): Promise<GasPriceParameters> {
-        return await this.innerGetGasPrice({ forExecutor })
+    public async tryGetNetworkGasPrice(): Promise<GasPriceParameters> {
+        return await this.innerGetGasPrice()
     }
 
     public async getMaxBaseFeePerGas(): Promise<bigint> {
-        try {
-            let maxBaseFeePerGas = await this.baseFeePerGasQueue.getMaxValue()
-            if (!maxBaseFeePerGas) {
-                maxBaseFeePerGas = await this.getBaseFee()
-            }
-
-            return maxBaseFeePerGas
-        } catch (e) {
-            this.logger.error(
-                e,
-                "Failed to get max base fee per gas, returning 0n"
-            )
-            return 0n
+        let maxBaseFeePerGas = await this.baseFeePerGasQueue.getMaxValue()
+        if (!maxBaseFeePerGas) {
+            maxBaseFeePerGas = await this.getBaseFee()
         }
+
+        return maxBaseFeePerGas
     }
 
     public async getHighestMaxFeePerGas(): Promise<bigint> {

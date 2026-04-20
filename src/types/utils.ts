@@ -1,5 +1,4 @@
-// Error codes come from: https://eips.ethereum.org/EIPS/eip-7769
-export enum ERC7769Errors {
+export enum ValidationErrors {
     InvalidRequest = -32601,
     InvalidFields = -32602,
     SimulateValidation = -32500,
@@ -10,7 +9,10 @@ export enum ERC7769Errors {
     InsufficientStake = -32505,
     UnsupportedSignatureAggregator = -32506,
     InvalidSignature = -32507,
-    PaymasterDepositTooLow = -32508,
+    PaymasterDepositTooLow = -32508
+}
+
+export enum ExecutionErrors {
     UserOperationReverted = -32521
 }
 
@@ -31,3 +33,9 @@ export class RpcError extends Error {
 
 export type Environment = "production" | "staging" | "development"
 export type ApiVersion = "v1" | "v2"
+export type ChainType =
+    | "default"
+    | "op-stack"
+    | "arbitrum"
+    | "hedera"
+    | "mantle"

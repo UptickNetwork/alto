@@ -6,8 +6,7 @@ import {
     type UserOperationReceipt,
     entryPoint06Address,
     entryPoint07Address,
-    entryPoint08Address,
-    entryPoint09Address
+    entryPoint08Address
 } from "viem/account-abstraction"
 import { beforeEach, describe, expect, inject, test } from "vitest"
 import { beforeEachCleanUp, getSmartAccountClient } from "../src/utils/index.js"
@@ -24,10 +23,6 @@ describe.each([
     {
         entryPoint: entryPoint08Address,
         entryPointVersion: "0.8" as EntryPointVersion
-    },
-    {
-        entryPoint: entryPoint09Address,
-        entryPointVersion: "0.9" as EntryPointVersion
     }
 ])(
     "$entryPointVersion supports pimlico_sendUserOperationNow",

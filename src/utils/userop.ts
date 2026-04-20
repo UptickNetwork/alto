@@ -1,112 +1,70 @@
 import {
     type PackedUserOperation,
     type UserOperation,
-    type UserOperation06,
-    type UserOperation07,
-    type UserOperation08,
-    type UserOperation09,
     type UserOperationReceipt,
+    type UserOperationV06,
+    type UserOperationV07,
     logSchema,
     receiptSchema
 } from "@alto/types"
 import {
     type Address,
     type Hex,
+    type PublicClient,
     type TransactionReceipt,
+    concat,
     decodeEventLog,
+    encodeAbiParameters,
     getAbiItem,
     getAddress,
+    keccak256,
+    pad,
     size,
     slice,
     toHex,
     zeroAddress
 } from "viem"
-import {
-    type EntryPointVersion,
-    entryPoint07Abi,
-    getUserOperationHash,
-    toPackedUserOperation
-} from "viem/account-abstraction"
+import { entryPoint07Abi } from "viem/account-abstraction"
 import { z } from "zod"
-import type { AltoConfig } from "../createConfig"
-import { getEip7702AuthAddress } from "./eip7702"
+import { getAuthorizationStateOverrides } from "./helpers"
 
-// Type predicate check if the UserOperation is v0.6
+// Type predicate check if the UserOperation is V06.
 export function isVersion06(
     operation: UserOperation
-): operation is UserOperation06 {
+): operation is UserOperationV06 {
     return "initCode" in operation && "paymasterAndData" in operation
 }
 
-// Type predicate to check if the UserOperation is v0.7
+// Type predicate to check if the UserOperation is V07.
 export function isVersion07(
     operation: UserOperation
-): operation is UserOperation07 {
+): operation is UserOperationV07 {
     return "factory" in operation && "paymaster" in operation
 }
 
-// Type predicate to check if the UserOperation is v0.8
+// Type predicate to check if the UserOperation is V07.
 export function isVersion08(
     operation: UserOperation,
     entryPointAddress: Address
-): operation is UserOperation07 {
-    return entryPointAddress.startsWith("0x433708")
+): operation is UserOperationV07 {
+    return entryPointAddress.startsWith("0x4337")
 }
 
-// Type predicate to check if the UserOperation is v0.9
-export function isVersion09(
-    operation: UserOperation,
-    entryPointAddress: Address
-): operation is UserOperation07 {
-    return entryPointAddress.startsWith("0x433709")
+export function getInitCode(unpackedUserOp: UserOperationV07) {
+    return unpackedUserOp.factory
+        ? concat([
+              unpackedUserOp.factory === "0x7702"
+                  ? pad(unpackedUserOp.factory, {
+                        dir: "right",
+                        size: 20
+                    })
+                  : unpackedUserOp.factory,
+              unpackedUserOp.factoryData || ("0x" as Hex)
+          ])
+        : "0x"
 }
 
-// Validates that EntryPoint 0.9 userOps don't include PAYMASTER_SIG_MAGIC (should be included in userOp.paymasterSignature rather than userOp.paymasterData)
-export function validatePaymasterSignature({
-    userOp,
-    entryPoint
-}: {
-    userOp: UserOperation
-    entryPoint: Address
-}): string | null {
-    if (!isVersion09(userOp, entryPoint)) {
-        return null
-    }
-
-    const paymasterData = userOp.paymasterData
-    if (!paymasterData || paymasterData === "0x") {
-        return null
-    }
-
-    // Magic bytes indicating packedUserOp's paymasterData should follow
-    // See: https://docs.erc4337.io/paymasters/paymaster-signature.html
-    const paymasterSigMagic: Hex = "0x22e325a297439656"
-    const magicBytesSize = size(paymasterSigMagic) // 8 bytes
-    const paymasterDataSize = size(paymasterData)
-
-    if (paymasterDataSize < magicBytesSize) {
-        return null
-    }
-
-    // Get the last 8 bytes and compare with magic
-    const lastBytes = slice(paymasterData, paymasterDataSize - magicBytesSize)
-    if (lastBytes === paymasterSigMagic) {
-        return "paymasterData incorrectly contains PAYMASTER_SIG_MAGIC signature placeholder. The actual paymaster signature must be included in userOp.paymasterSignature instead."
-    }
-
-    return null
-}
-
-// Check if a userOperation is a deployment operation
-export function isDeployment(userOp: UserOperation): boolean {
-    const isDeployment06 =
-        isVersion06(userOp) && !!userOp.initCode && userOp.initCode !== "0x"
-    const isDeployment07 =
-        isVersion07(userOp) && !!userOp.factory && userOp.factory !== "0x"
-    return isDeployment06 || isDeployment07
-}
-
-function unPackInitCode(initCode: Hex) {
+export function unPackInitCode(initCode: Hex) {
     if (initCode === "0x") {
         return {
             factory: null,
@@ -120,21 +78,54 @@ function unPackInitCode(initCode: Hex) {
     }
 }
 
-function unpackAccountGasLimits(accountGasLimits: Hex) {
+export function getAccountGasLimits(unpackedUserOp: UserOperationV07) {
+    return concat([
+        pad(toHex(unpackedUserOp.verificationGasLimit), {
+            size: 16
+        }),
+        pad(toHex(unpackedUserOp.callGasLimit), { size: 16 })
+    ])
+}
+
+export function unpackAccountGasLimits(accountGasLimits: Hex) {
     return {
         verificationGasLimit: BigInt(slice(accountGasLimits, 0, 16)),
         callGasLimit: BigInt(slice(accountGasLimits, 16))
     }
 }
 
-function unpackGasLimits(gasLimits: Hex) {
+export function getGasLimits(unpackedUserOp: UserOperationV07) {
+    return concat([
+        pad(toHex(unpackedUserOp.maxPriorityFeePerGas), {
+            size: 16
+        }),
+        pad(toHex(unpackedUserOp.maxFeePerGas), { size: 16 })
+    ])
+}
+
+export function unpackGasLimits(gasLimits: Hex) {
     return {
         maxPriorityFeePerGas: BigInt(slice(gasLimits, 0, 16)),
         maxFeePerGas: BigInt(slice(gasLimits, 16))
     }
 }
 
-function unpackPaymasterAndData(paymasterAndData: Hex) {
+export function getPaymasterAndData(unpackedUserOp: UserOperationV07) {
+    return unpackedUserOp.paymaster
+        ? concat([
+              unpackedUserOp.paymaster,
+              pad(toHex(unpackedUserOp.paymasterVerificationGasLimit || 0n), {
+                  size: 16
+              }),
+              pad(toHex(unpackedUserOp.paymasterPostOpGasLimit || 0n), {
+                  size: 16
+              }),
+              unpackedUserOp.paymasterData || ("0x" as Hex)
+          ])
+        : "0x"
+}
+
+export function unpackPaymasterAndData(paymasterAndData: Hex) {
     if (paymasterAndData === "0x") {
         return {
             paymaster: null,
@@ -155,49 +146,20 @@ function unpackPaymasterAndData(paymasterAndData: Hex) {
     }
 }
 
-// Convert Alto's UserOperation07/08/09 (with null) to viem's format (with undefined)
-export function toViemUserOp(
-    userOp: UserOperation07 | UserOperation08 | UserOperation09
-) {
-    const authorization = userOp.eip7702Auth
-        ? {
-              address: getEip7702AuthAddress(userOp.eip7702Auth),
-              chainId: userOp.eip7702Auth.chainId,
-              nonce: userOp.eip7702Auth.nonce,
-              r: userOp.eip7702Auth.r,
-              s: userOp.eip7702Auth.s,
-              yParity: userOp.eip7702Auth.yParity,
-              v: userOp.eip7702Auth.v
-          }
-        : undefined
-
-    const base = {
-        ...userOp,
-        paymaster: userOp.paymaster ?? undefined,
-        paymasterData: userOp.paymasterData ?? undefined,
-        paymasterVerificationGasLimit:
-            userOp.paymasterVerificationGasLimit ?? undefined,
-        paymasterPostOpGasLimit: userOp.paymasterPostOpGasLimit ?? undefined,
-        factory: userOp.factory ?? undefined,
-        factoryData: userOp.factoryData ?? undefined,
-        authorization
-    }
-
-    // UserOperation09 has paymasterSignature field
-    if ("paymasterSignature" in userOp) {
-        return {
-            ...base,
-            paymasterSignature: userOp.paymasterSignature ?? undefined
-        }
-    }
-
-    return base
-}
-
 export function toPackedUserOp(
-    unpacked: UserOperation07 | UserOperation08 | UserOperation09
+    unpackedUserOp: UserOperationV07
 ): PackedUserOperation {
-    return toPackedUserOperation(toViemUserOp(unpacked))
+    return {
+        sender: unpackedUserOp.sender,
+        nonce: unpackedUserOp.nonce,
+        initCode: getInitCode(unpackedUserOp),
+        callData: unpackedUserOp.callData,
+        accountGasLimits: getAccountGasLimits(unpackedUserOp),
+        preVerificationGas: unpackedUserOp.preVerificationGas,
+        gasFees: getGasLimits(unpackedUserOp),
+        paymasterAndData: getPaymasterAndData(unpackedUserOp),
+        signature: unpackedUserOp.signature
+    }
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
@@ -241,47 +203,263 @@ export function getAddressFromInitCodeOrPaymasterAndData(
     return null
 }
 
-export function getUserOpHash({
+export const getUserOpHashV06 = ({
     userOp,
     entryPointAddress,
     chainId
 }: {
+    userOp: UserOperationV06
+    entryPointAddress: Address
+    chainId: number
+}) => {
+    const hash = keccak256(
+        encodeAbiParameters(
+            [
+                {
+                    name: "sender",
+                    type: "address"
+                },
+                {
+                    name: "nonce",
+                    type: "uint256"
+                },
+                {
+                    name: "initCodeHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "callDataHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "callGasLimit",
+                    type: "uint256"
+                },
+                {
+                    name: "verificationGasLimit",
+                    type: "uint256"
+                },
+                {
+                    name: "preVerificationGas",
+                    type: "uint256"
+                },
+                {
+                    name: "maxFeePerGas",
+                    type: "uint256"
+                },
+                {
+                    name: "maxPriorityFeePerGas",
+                    type: "uint256"
+                },
+                {
+                    name: "paymasterAndDataHash",
+                    type: "bytes32"
+                }
+            ],
+            [
+                userOp.sender,
+                userOp.nonce,
+                keccak256(userOp.initCode),
+                keccak256(userOp.callData),
+                userOp.callGasLimit,
+                userOp.verificationGasLimit,
+                userOp.preVerificationGas,
+                userOp.maxFeePerGas,
+                userOp.maxPriorityFeePerGas,
+                keccak256(userOp.paymasterAndData)
+            ]
+        )
+    )
+
+    return keccak256(
+        encodeAbiParameters(
+            [
+                {
+                    name: "userOpHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "entryPointAddress",
+                    type: "address"
+                },
+                {
+                    name: "chainId",
+                    type: "uint256"
+                }
+            ],
+            [hash, entryPointAddress, BigInt(chainId)]
+        )
+    )
+}
+
+export const getUserOpHashV07 = ({
+    userOp,
+    entryPointAddress,
+    chainId
+}: {
+    userOp: PackedUserOperation
+    entryPointAddress: Address
+    chainId: number
+}) => {
+    const hash = keccak256(
+        encodeAbiParameters(
+            [
+                {
+                    name: "sender",
+                    type: "address"
+                },
+                {
+                    name: "nonce",
+                    type: "uint256"
+                },
+                {
+                    name: "initCodeHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "callDataHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "accountGasLimits",
+                    type: "bytes32"
+                },
+                {
+                    name: "preVerificationGas",
+                    type: "uint256"
+                },
+                {
+                    name: "gasFees",
+                    type: "bytes32"
+                },
+                {
+                    name: "paymasterAndDataHash",
+                    type: "bytes32"
+                }
+            ],
+            [
+                userOp.sender,
+                userOp.nonce,
+                keccak256(userOp.initCode),
+                keccak256(userOp.callData),
+                userOp.accountGasLimits,
+                userOp.preVerificationGas,
+                userOp.gasFees,
+                keccak256(userOp.paymasterAndData)
+            ]
+        )
+    )
+
+    return keccak256(
+        encodeAbiParameters(
+            [
+                {
+                    name: "userOpHash",
+                    type: "bytes32"
+                },
+                {
+                    name: "entryPointAddress",
+                    type: "address"
+                },
+                {
+                    name: "chainId",
+                    type: "uint256"
+                }
+            ],
+            [hash, entryPointAddress, BigInt(chainId)]
+        )
+    )
+}
+
+export const getUserOpHashV08 = async ({
+    userOp,
+    entryPointAddress,
+    publicClient
+}: {
+    userOp: UserOperationV07
+    entryPointAddress: Address
+    chainId: number
+    publicClient: PublicClient
+}) => {
+    const packedUserOp = toPackedUserOp(userOp)
+
+    // : concat(["0xef0100", code ?? "0x"])
+    const stateOverrides = getAuthorizationStateOverrides({
+        userOps: [userOp]
+    })
+
+    const hash = await publicClient.readContract({
+        address: entryPointAddress,
+        abi: [
+            {
+                inputs: [
+                    {
+                        components: [
+                            { name: "sender", type: "address" },
+                            { name: "nonce", type: "uint256" },
+                            { name: "initCode", type: "bytes" },
+                            { name: "callData", type: "bytes" },
+                            { name: "accountGasLimits", type: "bytes32" },
+                            { name: "preVerificationGas", type: "uint256" },
+                            { name: "gasFees", type: "bytes32" },
+                            { name: "paymasterAndData", type: "bytes" },
+                            { name: "signature", type: "bytes" }
+                        ],
+                        name: "userOp",
+                        type: "tuple"
+                    }
+                ],
+                name: "getUserOpHash",
+                outputs: [{ name: "", type: "bytes32" }],
+                stateMutability: "view",
+                type: "function"
+            }
+        ],
+        functionName: "getUserOpHash",
+        args: [packedUserOp],
+        stateOverride: [
+            ...Object.keys(stateOverrides).map((address) => ({
+                address: address as Address,
+                code: stateOverrides[address as Address]?.code ?? "0x"
+            }))
+        ]
+    })
+
+    return hash
+}
+
+export const getUserOpHash = ({
+    userOp,
+    entryPointAddress,
+    chainId,
+    publicClient
+}: {
     userOp: UserOperation
     entryPointAddress: Address
     chainId: number
-}): Hex {
-    if (isVersion09(userOp, entryPointAddress)) {
-        return getUserOperationHash({
-            chainId,
+    publicClient: PublicClient
+}) => {
+    if (isVersion06(userOp)) {
+        return getUserOpHashV06({
+            userOp,
             entryPointAddress,
-            entryPointVersion: "0.9",
-            userOperation: toViemUserOp(userOp)
+            chainId
         })
     }
 
     if (isVersion08(userOp, entryPointAddress)) {
-        return getUserOperationHash({
-            chainId,
+        return getUserOpHashV08({
+            userOp,
             entryPointAddress,
-            entryPointVersion: "0.8",
-            userOperation: toViemUserOp(userOp)
+            chainId,
+            publicClient
         })
     }
 
-    if (isVersion07(userOp)) {
-        return getUserOperationHash({
-            chainId,
-            entryPointAddress,
-            entryPointVersion: "0.7",
-            userOperation: toViemUserOp(userOp)
-        })
-    }
-
-    return getUserOperationHash({
-        chainId,
+    return getUserOpHashV07({
+        userOp: toPackedUserOp(userOp),
         entryPointAddress,
-        entryPointVersion: "0.6",
-        userOperation: userOp
+        chainId
     })
 }
 
@@ -292,43 +470,9 @@ export const getNonceKeyAndSequence = (nonce: bigint) => {
     return [nonceKey, nonceSequence]
 }
 
-// Check if a userOperation has a paymaster
-export function hasPaymaster(userOp: UserOperation): boolean {
-    if (isVersion06(userOp)) {
-        return !!userOp.paymasterAndData && userOp.paymasterAndData !== "0x"
-    }
-    return !!userOp.paymaster && userOp.paymaster !== "0x"
-}
-
-export function calculateRequiredPrefund(userOp: UserOperation): bigint {
-    if (isVersion06(userOp)) {
-        const mul = hasPaymaster(userOp) ? 3n : 1n
-        const requiredGas =
-            userOp.callGasLimit +
-            userOp.verificationGasLimit * mul +
-            userOp.preVerificationGas
-
-        return requiredGas * userOp.maxFeePerGas
-    }
-
-    // v0.7/v0.8 logic: sum all gas limits directly
-    const paymasterVerificationGasLimit =
-        userOp.paymasterVerificationGasLimit ?? 0n
-    const paymasterPostOpGasLimit = userOp.paymasterPostOpGasLimit ?? 0n
-
-    const requiredGas =
-        userOp.verificationGasLimit +
-        userOp.callGasLimit +
-        paymasterVerificationGasLimit +
-        paymasterPostOpGasLimit +
-        userOp.preVerificationGas
-
-    return requiredGas * userOp.maxFeePerGas
-}
-
 export function toUnpackedUserOp(
     packedUserOp: PackedUserOperation
-): UserOperation07 {
+): UserOperationV07 {
     const { factory, factoryData } = unPackInitCode(packedUserOp.initCode)
 
     const { callGasLimit, verificationGasLimit } = unpackAccountGasLimits(
@@ -431,7 +575,7 @@ export function parseUserOpReceipt(
                 // Update startIndex to this UserOpEvent for the next UserOp's logs
                 startIndex = index
             }
-        } catch {}
+        } catch (e) {}
     }
 
     if (userOpEventIndex === -1 || startIndex === -1 || !userOpEventArgs) {
@@ -466,40 +610,4 @@ export function parseUserOpReceipt(
     }
 
     return userOpReceipt
-}
-
-export const getViemEntryPointVersion = (
-    userOp: UserOperation,
-    entryPoint: Address
-): EntryPointVersion => {
-    if (isVersion09(userOp, entryPoint)) {
-        return "0.9"
-    }
-
-    if (isVersion08(userOp, entryPoint)) {
-        return "0.8"
-    }
-
-    if (isVersion07(userOp)) {
-        return "0.7"
-    }
-
-    return "0.6"
-}
-
-export const getEntryPointSimulationsAddress = ({
-    version,
-    config
-}: {
-    version: EntryPointVersion
-    config: AltoConfig
-}): Address | undefined => {
-    switch (version) {
-        case "0.9":
-            return config.entrypointSimulationContractV9
-        case "0.8":
-            return config.entrypointSimulationContractV8
-        default:
-            return config.entrypointSimulationContractV7
-    }
 }

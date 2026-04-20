@@ -1,14 +1,13 @@
 import {
     type ApiVersion,
-    ERC7769Errors,
     type JSONRPCResponse,
     RpcError,
+    ValidationErrors,
     altoVersions,
     bundlerRequestSchema,
     jsonRpcSchema
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
-import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
 import * as sentry from "@sentry/node"
 import Fastify, {
@@ -61,11 +60,11 @@ JSON.stringify = (
 }
 
 export class Server {
-    private readonly config: AltoConfig
-    private readonly fastify: FastifyInstance
-    private readonly rpcEndpoint: RpcHandler
-    private readonly registry: Registry
-    private readonly metrics: Metrics
+    private config: AltoConfig
+    private fastify: FastifyInstance
+    private rpcEndpoint: RpcHandler
+    private registry: Registry
+    private metrics: Metrics
 
     constructor({
         config,
@@ -91,9 +90,6 @@ export class Server {
             requestTimeout: config.timeout,
             disableRequestLogging: true
         })
-        if (config.enableCors) {
-            this.fastify.register(cors, { origin: true })
-        }
 
         this.fastify.register(rpcDecorators)
 
@@ -183,7 +179,7 @@ export class Server {
     ): Promise<void> {
         try {
             request.body = JSON.parse(msgBuffer.toString())
-        } catch {
+        } catch (err) {
             socket.send(
                 JSON.stringify({
                     jsonrpc: "2.0",
@@ -191,7 +187,7 @@ export class Server {
                     error: {
                         message: "invalid JSON-RPC request",
                         data: msgBuffer.toString(),
-                        code: ERC7769Errors.InvalidFields
+                        code: ValidationErrors.InvalidFields
                     }
                 })
             )
@@ -209,7 +205,7 @@ export class Server {
     }
 
     private async rpc(request: FastifyRequest, reply: RpcReply): Promise<void> {
-        let requestId: number | string | null = null
+        let requestId: number | null = null
 
         const versionParsingResult = altoVersions.safeParse(
             (request.params as any)?.version ?? this.config.defaultApiVersion
@@ -219,16 +215,16 @@ export class Server {
             const error = fromZodError(versionParsingResult.error)
             throw new RpcError(
                 `invalid version ${error.message}`,
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
         const apiVersion: ApiVersion = versionParsingResult.data
 
-        if (!this.config.apiVersion.includes(apiVersion)) {
+        if (this.config.apiVersion.indexOf(apiVersion) === -1) {
             throw new RpcError(
                 `unsupported version ${apiVersion}`,
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -242,7 +238,7 @@ export class Server {
             ) {
                 throw new RpcError(
                     "invalid content-type, content-type must be application/json",
-                    ERC7769Errors.InvalidFields
+                    ValidationErrors.InvalidFields
                 )
             }
             this.fastify.log.trace(
@@ -255,7 +251,7 @@ export class Server {
                 const validationError = fromZodError(jsonRpcParsing.error)
                 throw new RpcError(
                     `invalid JSON-RPC request ${validationError.message}`,
-                    ERC7769Errors.InvalidFields
+                    ValidationErrors.InvalidFields
                 )
             }
 
@@ -277,13 +273,13 @@ export class Server {
                 ) {
                     throw new RpcError(
                         "Missing/invalid userOpHash",
-                        ERC7769Errors.InvalidFields
+                        ValidationErrors.InvalidFields
                     )
                 }
 
                 throw new RpcError(
                     validationError.message,
-                    ERC7769Errors.InvalidRequest
+                    ValidationErrors.InvalidRequest
                 )
             }
 
@@ -296,7 +292,7 @@ export class Server {
             ) {
                 throw new RpcError(
                     `Method not supported: ${bundlerRequest.method}`,
-                    ERC7769Errors.InvalidRequest
+                    ValidationErrors.InvalidRequest
                 )
             }
 

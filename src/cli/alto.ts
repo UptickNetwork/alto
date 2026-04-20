@@ -13,11 +13,8 @@ import {
     gasEstimationOptions,
     logOptions,
     mempoolOptions,
-    preVerificationGasOptions,
-    redisOptions,
     rpcOptions,
-    serverOptions,
-    utilityOptions
+    serverOptions
 } from "./config"
 import { registerCommandToYargs } from "./util"
 
@@ -87,8 +84,6 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(serverOptions), "Server Options:")
         .options(executorOptions)
         .group(Object.keys(executorOptions), "Executor Options:")
-        .options(utilityOptions)
-        .group(Object.keys(utilityOptions), "Utility Wallet Options:")
         .options(rpcOptions)
         .group(Object.keys(rpcOptions), "RPC Options:")
         .options(logOptions)
@@ -97,15 +92,8 @@ export function getAltoCli(): yargs.Argv {
         .group(Object.keys(debugOptions), "Debug Options:")
         .options(gasEstimationOptions)
         .group(Object.keys(gasEstimationOptions), "Gas Estimation Options:")
-        .options(preVerificationGasOptions)
-        .group(
-            Object.keys(preVerificationGasOptions),
-            "PreVerificationGas Options:"
-        )
         .options(mempoolOptions)
         .group(Object.keys(mempoolOptions), "Mempool Options:")
-        .options(redisOptions)
-        .group(Object.keys(redisOptions), "Redis Options:")
         // blank scriptName so that help text doesn't display the cli name before each command
         .scriptName("")
         .demandCommand(1)
@@ -142,14 +130,12 @@ alto.fail((msg, err) => {
         }
     }
 
-    let errorMessage: string | undefined
-    if (err === undefined) {
-        errorMessage = msg || "Unknown error"
-    } else if (err instanceof YargsError) {
-        errorMessage = err.message
-    } else {
-        errorMessage = err.stack
-    }
+    const errorMessage =
+        err !== undefined
+            ? err instanceof YargsError
+                ? err.message
+                : err.stack
+            : msg || "Unknown error"
 
     // eslint-disable-next-line no-console
     console.error(` × ${errorMessage}\n`)

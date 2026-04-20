@@ -21,7 +21,7 @@ import "account-abstraction-v6/core/NonceManager.sol";
 
 import "@openzeppelin-v4.8.3/contracts/utils/introspection/ERC165.sol";
 import "@openzeppelin-v4.8.3/contracts/security/ReentrancyGuard.sol";
-import "../SimulationOverrideHelper.sol";
+import "@openzeppelin-v4.8.3/contracts/utils/StorageSlot.sol";
 
 // THIS IS A MODIFIED VERSION OF account-abstraction-v6/core/EntryPoint.sol.
 // THIS CONTRACT IS MEANT TO BE USED AS A CODE OVERRIDE DURING eth_estimateUserOperationGas SIMULATIONS.
@@ -414,7 +414,8 @@ contract EntryPointGasEstimationOverride06 is IEntryPoint, StakeManager, NonceMa
             if (sender.code.length != 0) revert FailedOp(opIndex, "AA10 sender already constructed");
 
             // Get the sender creator address from the storage slot, or fallback to the default value.
-            address creator = SimulationOverrideHelper.getSenderCreator06();
+            address creator = StorageSlot.getAddressSlot(keccak256("SENDER_CREATOR")).value;
+            if (creator == address(0)) creator = 0x7fc98430eAEdbb6070B35B39D798725049088348;
             address sender1 = SenderCreator(creator).createSender{gas: opInfo.mUserOp.verificationGasLimit}(initCode);
 
             if (sender1 == address(0)) revert FailedOp(opIndex, "AA13 initCode failed or OOG");
@@ -433,7 +434,8 @@ contract EntryPointGasEstimationOverride06 is IEntryPoint, StakeManager, NonceMa
      */
     function getSenderAddress(bytes calldata initCode) public {
         // Get the sender creator address from the storage slot, or fallback to the default value.
-        address creator = SimulationOverrideHelper.getSenderCreator06();
+        address creator = StorageSlot.getAddressSlot(keccak256("SENDER_CREATOR")).value;
+        if (creator == address(0)) creator = 0x7fc98430eAEdbb6070B35B39D798725049088348;
         address sender = SenderCreator(creator).createSender(initCode);
 
         revert SenderAddressResult(sender);
@@ -592,8 +594,8 @@ contract EntryPointGasEstimationOverride06 is IEntryPoint, StakeManager, NonceMa
             return (address(0), false);
         }
         ValidationData memory data = _parseValidationData(validationData);
-        uint256 blockTimestamp = SimulationOverrideHelper.getBlockTimestamp();
-        outOfTimeRange = blockTimestamp > data.validUntil || blockTimestamp < data.validAfter;
+        // solhint-disable-next-line not-rely-on-time
+        outOfTimeRange = block.timestamp > data.validUntil || block.timestamp < data.validAfter;
         aggregator = data.aggregator;
     }
 
@@ -735,7 +737,7 @@ contract EntryPointGasEstimationOverride06 is IEntryPoint, StakeManager, NonceMa
                 //legacy mode (for networks that don't support basefee opcode)
                 return maxFeePerGas;
             }
-            return min(maxFeePerGas, maxPriorityFeePerGas + SimulationOverrideHelper.getBlockBaseFee());
+            return min(maxFeePerGas, maxPriorityFeePerGas + block.basefee);
         }
     }
 

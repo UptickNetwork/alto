@@ -125,7 +125,6 @@ pnpm run build:contracts-v08
 - **Strict Mode**: Always enabled with additional checks
 - **Module System**: ESM with `@alto/*` aliases for internal imports
 - **Target**: ESNext for modern JavaScript features
-- **Type Safety**: Never use `any` type - use proper type definitions, `unknown`, or type assertions when needed
 
 ### Coding Conventions
 
@@ -135,7 +134,7 @@ pnpm run build:contracts-v08
 - **Files**: kebab-case for filenames (e.g., `gas-price-manager.ts`)
 - **Constants**: UPPER_SNAKE_CASE for constants
 - **Functions/Methods**: camelCase
-- **UserOperation Naming**:
+- **UserOperation Naming**: 
   - **Local variables and parameters**: Use `userOp` (e.g., `submittedUserOp`, `validUserOp`, `queuedUserOps`)
   - **Local method names**: Use `userOp` (e.g., `dropUserOps`, `addUserOp`, `getUserOpHash`)
   - **RPC endpoints**: Use full `userOperation` name (e.g., `eth_sendUserOperation`)
@@ -143,9 +142,6 @@ pnpm run build:contracts-v08
   - **Zod schemas**: Use full `userOperation` name (e.g., `userOperationSchema`, `userOperationV06Schema`)
   - **Solidity contracts**: Use full `UserOperation` name
   - **Inline comments**: Use full `userOperation` when referring to the concept
-- **EntryPoint Naming**:
-  - **Local variables and parameters**: Use `entryPoint` (e.g., `entryPoint`, `supportedEntryPoints`)
-  - **Avoid**: `entryPointAddress` - prefer just `entryPoint` since it's understood to be an address
 
 #### Import Organization
 1. External dependencies
@@ -170,17 +166,7 @@ async function functionName({
 #### Error Handling
 - Use custom error classes (e.g., `RpcError`)
 - Include specific error codes from enums
-- **Viem errors are wrapped**: Never use direct `instanceof` checks on caught viem errors. Viem wraps errors (e.g., `InsufficientFundsError` inside `TransactionExecutionError`). Always use `BaseError.walk()` to find the actual error in the cause chain:
-  ```typescript
-  if (e instanceof BaseError) {
-      const isInsufficientFunds = e.walk(
-          (err) => err instanceof InsufficientFundsError
-      )
-      if (isInsufficientFunds) {
-          // handle
-      }
-  }
-  ```
+- Walk error chains for Viem errors
 - Return error tuples for non-throwing operations
 
 #### Logging
@@ -188,7 +174,6 @@ async function functionName({
 - Create child loggers with context
 - Convert BigInts to hex strings in logs
 - Include relevant data in log objects
-- Pino expects errors to be logged with the `err` key (not `error`): `logger.error({ err: error }, "message")`
 
 ### Validation Patterns
 - Use Zod schemas for runtime validation
@@ -236,10 +221,6 @@ When working with BigInt calculations, use the utility functions from `@alto/uti
 - **minBigInt/maxBigInt**: Get min/max of two BigInts
 - **roundUpBigInt**: Round up to nearest multiple
 - Never use manual percentage calculations like `(value * 150n) / 100n`
-
-When extracting userOp hashes from `UserOpInfo[]` arrays, use `getUserOpHashes` from `@alto/executor`:
-- **getUserOpHashes**: Extract hashes from userOp info array (e.g., `getUserOpHashes(userOps)` returns `string[]`)
-- Never manually map like `userOps.map(op => op.userOpHash)` - use the helper instead
 
 ### Performance Considerations
 - Batch operations when possible

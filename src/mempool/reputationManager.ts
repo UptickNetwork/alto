@@ -1,10 +1,11 @@
 import {
-    ERC7769Errors,
     EntryPointV06Abi,
     RpcError,
     type StakeInfo,
     type UserOperation,
-    type ValidationResult
+    ValidationErrors,
+    type ValidationResult,
+    type ValidationResultWithAggregation
 } from "@alto/types"
 import type { Logger } from "@alto/utils"
 import {
@@ -19,7 +20,7 @@ export interface InterfaceReputationManager {
     checkReputation(
         userOp: UserOperation,
         entryPoint: Address,
-        validationResult: ValidationResult
+        validationResult: ValidationResult | ValidationResultWithAggregation
     ): void
     increaseUserOpSeenStatus(
         userOp: UserOperation,
@@ -110,7 +111,7 @@ export class NullReputationManager implements InterfaceReputationManager {
     checkReputation(
         _userOp: UserOperation,
         _entryPoint: Address,
-        _validationResult: ValidationResult
+        _validationResult: ValidationResult | ValidationResultWithAggregation
     ): void {
         return
     }
@@ -123,26 +124,26 @@ export class NullReputationManager implements InterfaceReputationManager {
         return
     }
 
-    async increaseUserOpSeenStatus(
+    increaseUserOpSeenStatus(
         _: UserOperation,
         _entryPoint: Address
     ): Promise<void> {
-        return
+        return Promise.resolve()
     }
 
-    async replaceUserOpSeenStatus(
+    replaceUserOpSeenStatus(
         _: UserOperation,
         _entryPoint: Address
     ): Promise<void> {
-        return
+        return Promise.resolve()
     }
 
-    async decreaseUserOpSeenStatus(
+    decreaseUserOpSeenStatus(
         _: UserOperation,
         _entryPoint: Address,
         _error: string
     ): Promise<void> {
-        return
+        return Promise.resolve()
     }
 
     updateUserOpIncludedStatus(
@@ -199,19 +200,19 @@ export class NullReputationManager implements InterfaceReputationManager {
 }
 
 export class ReputationManager implements InterfaceReputationManager {
-    private readonly config: AltoConfig
-    private readonly throttledEntityMinMempoolCount: bigint
-    private readonly maxMempoolUserOpsPerSender: bigint
-    private readonly maxMempoolUserOpsPerNewUnstakedEntity: bigint
-    private readonly inclusionRateFactor: bigint
-    private readonly whitelist: Set<Address> = new Set()
-    private readonly blackList: Set<Address> = new Set()
-    private readonly bundlerReputationParams: ReputationParams
-    private readonly logger: Logger
+    private config: AltoConfig
     private entityCount: { [address: Address]: bigint } = {}
+    private throttledEntityMinMempoolCount: bigint
+    private maxMempoolUserOpsPerSender: bigint
+    private maxMempoolUserOpsPerNewUnstakedEntity: bigint
+    private inclusionRateFactor: bigint
     private entries: {
         [entryPoint: Address]: { [address: Address]: ReputationEntry }
     } = {}
+    private whitelist: Set<Address> = new Set()
+    private blackList: Set<Address> = new Set()
+    private bundlerReputationParams: ReputationParams
+    private logger: Logger
 
     constructor(config: AltoConfig) {
         this.config = config
@@ -319,7 +320,7 @@ export class ReputationManager implements InterfaceReputationManager {
     checkReputation(
         userOp: UserOperation,
         entryPoint: Address,
-        validationResult: ValidationResult
+        validationResult: ValidationResult | ValidationResultWithAggregation
     ): void {
         this.increaseUserOpCount(userOp)
 
@@ -346,11 +347,13 @@ export class ReputationManager implements InterfaceReputationManager {
             )
         }
 
-        if (validationResult.aggregatorInfo) {
+        const aggregatorValidationResult =
+            validationResult as ValidationResultWithAggregation
+        if (aggregatorValidationResult.aggregatorInfo) {
             this.checkReputationStatus(
                 entryPoint,
                 EntityType.Aggregator,
-                validationResult.aggregatorInfo.stakeInfo
+                aggregatorValidationResult.aggregatorInfo.stakeInfo
             )
         }
     }
@@ -385,47 +388,47 @@ export class ReputationManager implements InterfaceReputationManager {
         if (!entry) {
             this.entries[entryPoint][address] = {
                 address,
-                opsSeen: 10_000n,
+                opsSeen: 10000n,
                 opsIncluded: 0n
             }
             return
         }
-        entry.opsSeen = 10_000n
+        entry.opsSeen = 10000n
         entry.opsIncluded = 0n
     }
 
     crashedHandleOps(
-        userOp: UserOperation,
+        op: UserOperation,
         entryPoint: Address,
         reason: string
     ): void {
-        const isUserOpV06 = isVersion06(userOp)
+        const isUserOpV06 = isVersion06(op)
 
         if (reason.startsWith("AA3")) {
             // paymaster
             const paymaster = isUserOpV06
-                ? getAddressFromInitCodeOrPaymasterAndData(
-                      userOp.paymasterAndData
-                  )
-                : userOp.paymaster
+                ? getAddressFromInitCodeOrPaymasterAndData(op.paymasterAndData)
+                : (op.paymaster as Address | undefined)
             if (paymaster) {
                 this.updateCrashedHandleOps(entryPoint, paymaster)
             }
         } else if (reason.startsWith("AA2")) {
-            const factory = isUserOpV06 ? undefined : userOp.factory
+            const factory = isUserOpV06
+                ? undefined
+                : (op.factory as Address | undefined)
 
             if (factory) {
                 this.updateCrashedHandleOps(entryPoint, factory)
             } else {
                 // sender
-                const sender = userOp.sender
+                const sender = op.sender
                 this.updateCrashedHandleOps(entryPoint, sender)
             }
         } else if (reason.startsWith("AA1")) {
             // init code
             const factory = isUserOpV06
-                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-                : userOp.factory
+                ? getAddressFromInitCodeOrPaymasterAndData(op.initCode)
+                : (op.factory as Address | undefined)
             if (factory) {
                 this.updateCrashedHandleOps(entryPoint, factory)
             }
@@ -456,15 +459,17 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
         if (paymaster) {
             this.updateIncludedStatus(entryPoint, paymaster)
         }
 
         if (accountDeployed) {
-            const factory = isUserOpV06
-                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-                : userOp.factory
+            const factory = (
+                isUserOpV06
+                    ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                    : userOp.factory
+            ) as Address | undefined
             if (factory) {
                 this.updateIncludedStatus(entryPoint, factory)
             }
@@ -487,14 +492,16 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
         if (paymaster) {
             this.increaseSeen(entryPoint, paymaster)
         }
 
-        const factory = isUserOpV06
-            ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-            : userOp.factory
+        const factory = (
+            isUserOpV06
+                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                : userOp.factory
+        ) as Address | undefined
 
         this.logger.debug({ userOp, factory }, "increaseUserOpSeenStatus")
 
@@ -519,14 +526,16 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
         if (paymaster) {
             this.decreaseSeen(entryPoint, paymaster)
         }
 
-        const factory = isUserOpV06
-            ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-            : userOp.factory
+        const factory = (
+            isUserOpV06
+                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                : userOp.factory
+        ) as Address | undefined
 
         this.logger.debug({ userOp, factory }, "increaseUserOpSeenStatus")
 
@@ -552,7 +561,7 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
 
         // can decrease if senderStakeInfo.isStaked is true
         // or when error does not include aa3
@@ -564,9 +573,11 @@ export class ReputationManager implements InterfaceReputationManager {
             this.decreaseSeen(entryPoint, paymaster)
         }
 
-        const factory = isUserOpV06
-            ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-            : userOp.factory
+        const factory = (
+            isUserOpV06
+                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                : userOp.factory
+        ) as Address | undefined
 
         this.logger.debug({ userOp, factory }, "decreaseUserOpSeenStatus")
 
@@ -582,15 +593,17 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
         if (paymaster) {
             this.entityCount[paymaster] =
                 (this.entityCount[paymaster] ?? 0n) + 1n
         }
 
-        const factory = isUserOpV06
-            ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-            : userOp.factory
+        const factory = (
+            isUserOpV06
+                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                : userOp.factory
+        ) as Address | undefined
         if (factory) {
             this.entityCount[factory] = (this.entityCount[factory] ?? 0n) + 1n
         }
@@ -606,7 +619,7 @@ export class ReputationManager implements InterfaceReputationManager {
 
         const paymaster = isUserOpV06
             ? getAddressFromInitCodeOrPaymasterAndData(userOp.paymasterAndData)
-            : userOp.paymaster
+            : (userOp.paymaster as Address | undefined)
         if (paymaster) {
             this.entityCount[paymaster] =
                 (this.entityCount[paymaster] ?? 0n) - 1n
@@ -617,9 +630,11 @@ export class ReputationManager implements InterfaceReputationManager {
                     : this.entityCount[paymaster]
         }
 
-        const factory = isUserOpV06
-            ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
-            : userOp.factory
+        const factory = (
+            isUserOpV06
+                ? getAddressFromInitCodeOrPaymasterAndData(userOp.initCode)
+                : userOp.factory
+        ) as Address | undefined
         if (factory) {
             this.entityCount[factory] = (this.entityCount[factory] ?? 0n) - 1n
 
@@ -708,7 +723,7 @@ export class ReputationManager implements InterfaceReputationManager {
         if (status === ReputationStatuses.banned) {
             throw new RpcError(
                 `${entityType} ${stakeInfo.addr} is banned from using the pimlico`,
-                ERC7769Errors.Reputation
+                ValidationErrors.Reputation
             )
         }
     }
@@ -722,7 +737,7 @@ export class ReputationManager implements InterfaceReputationManager {
         if (status === ReputationStatuses.throttled) {
             throw new RpcError(
                 `${entityType} ${stakeInfo.addr} is throttled by the pimlico`,
-                ERC7769Errors.Reputation
+                ValidationErrors.Reputation
             )
         }
     }
@@ -745,20 +760,20 @@ export class ReputationManager implements InterfaceReputationManager {
             if (stakeInfo.stake === 0n) {
                 throw new RpcError(
                     `${entityType} ${stakeInfo.addr} is unstaked and must stake minimum ${this.config.minEntityStake} to use pimlico`,
-                    ERC7769Errors.InsufficientStake
+                    ValidationErrors.InsufficientStake
                 )
             }
 
             throw new RpcError(
                 `${entityType} ${stakeInfo.addr} does not have enough stake to use pimlico`,
-                ERC7769Errors.InsufficientStake
+                ValidationErrors.InsufficientStake
             )
         }
 
         if (stakeInfo.unstakeDelaySec < this.config.minEntityUnstakeDelay) {
             throw new RpcError(
                 `${entityType} ${stakeInfo.addr} does not have enough unstake delay to use pimlico`,
-                ERC7769Errors.InsufficientStake
+                ValidationErrors.InsufficientStake
             )
         }
     }
@@ -779,7 +794,7 @@ export class ReputationManager implements InterfaceReputationManager {
         return (
             this.maxMempoolUserOpsPerNewUnstakedEntity +
             inclusionRate * this.inclusionRateFactor +
-            (entry.opsIncluded > 10_000n ? 10_000n : entry.opsIncluded)
+            (entry.opsIncluded > 10000n ? 10000n : entry.opsIncluded)
         )
     }
 }

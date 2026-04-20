@@ -1,7 +1,6 @@
 import { GasPriceManager } from "@alto/handlers"
 import {
     createMetrics,
-    formatNativeBalance,
     initDebugLogger,
     initProductionLogger
 } from "@alto/utils"
@@ -9,14 +8,19 @@ import { Registry } from "prom-client"
 import {
     type CallParameters,
     type Chain,
+    type GetBalanceParameters,
+    type GetBlockParameters,
+    type GetTransactionCountParameters,
     createPublicClient,
     createWalletClient,
     fallback,
+    formatEther,
     publicActions
 } from "viem"
 import * as chains from "viem/chains"
 import { type AltoConfig, createConfig } from "../createConfig"
 import { getSenderManager } from "../executor/senderManager/index"
+import { UtilityWalletMonitor } from "../executor/utilityWalletMonitor"
 import type { IOptionsInput } from "./config"
 import { customTransport } from "./customTransport"
 import { deploySimulationsContract } from "./deploySimulationsContract"
@@ -24,20 +28,6 @@ import { parseArgs } from "./parseArgs"
 import { setupServer } from "./setupServer"
 
 const preFlightChecks = async (config: AltoConfig): Promise<void> => {
-    // Check horizontal scaling configuration
-    if (config.enableHorizontalScaling && !config.redisEndpoint) {
-        throw new Error(
-            "Horizontal scaling is enabled but redis-endpoint is not configured."
-        )
-    }
-
-    // Check Redis receipt cache configuration
-    if (config.enableRedisReceiptCache && !config.redisEndpoint) {
-        throw new Error(
-            "Redis receipt cache is enabled but redis-endpoint is not configured."
-        )
-    }
-
     for (const entrypoint of config.entrypoints) {
         const entryPointCode = await config.publicClient.getCode({
             address: entrypoint
@@ -83,17 +73,17 @@ const preFlightChecks = async (config: AltoConfig): Promise<void> => {
     //     }
     // }
 
-    // if (config.entrypointSimulationContractV9) {
-    //     const simulations = config.entrypointSimulationContractV9
-    //     const simulationsCode = await config.publicClient.getCode({
-    //         address: simulations
-    //     })
-    //     if (simulationsCode === undefined || simulationsCode === "0x") {
-    //         throw new Error(
-    //             `EntryPointSimulationsV9 contract ${simulations} does not exist`
-    //         )
-    //     }
-    // }
+    if (config.refillHelperContract) {
+        const refillHelper = config.refillHelperContract
+        const refillHelperCode = await config.publicClient.getCode({
+            address: refillHelper
+        })
+        if (refillHelperCode === undefined || refillHelperCode === "0x") {
+            throw new Error(
+                `RefillHelper contract ${refillHelper} does not exist`
+            )
+        }
+    }
 }
 
 const getViemChain = ({
@@ -117,7 +107,6 @@ const getViemChain = ({
 
 export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     const args = parseArgs(args_)
-    const enableCors = args.enableCors
     const logger = args.json
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)
@@ -153,8 +142,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         rpcUrls: {
             default: { http: [args.rpcUrl] },
             public: { http: [args.rpcUrl] }
-        },
-        experimental_preconfirmationTime: args.flashblocksPreconfirmationTime
+        }
     }
 
     let publicClient = createPublicClient({
@@ -169,6 +157,52 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         pollingInterval: args.blockTime / 2,
         chain
     })
+
+    // When Flashblocks support is enabled, override the relevant public actions
+    // to always query against the "pending" block tag as per
+    // https://docs.base.org/chain/flashblocks/apps
+    if (args.flashblocksEnabled) {
+        publicClient = publicClient
+            .extend((client) => ({
+                // @ts-ignore
+                async getBlock(args?: GetBlockParameters) {
+                    if (
+                        args?.blockHash !== undefined ||
+                        args?.blockNumber !== undefined
+                    ) {
+                        return await client.getBlock(args)
+                    }
+
+                    return await client.getBlock({
+                        blockTag: "pending"
+                    })
+                },
+                async getBalance(args: GetBalanceParameters) {
+                    if (args.blockNumber !== undefined) {
+                        return await client.getBalance(args)
+                    }
+
+                    return await client.getBalance({
+                        address: args.address,
+                        blockNumber: undefined,
+                        blockTag: "pending"
+                    })
+                },
+                async getTransactionCount(args: GetTransactionCountParameters) {
+                    if (args.blockNumber !== undefined) {
+                        return await client.getTransactionCount(args)
+                    }
+
+                    return await client.getTransactionCount({
+                        address: args.address,
+                        blockNumber: undefined,
+                        blockTag: "pending"
+                    })
+                }
+            }))
+            // @ts-ignore
+            .extend(publicActions)
+    }
 
     // Some permissioned chains require a whitelisted address to make deployments.
     // In order for simulations to work, we need to make our eth_call's from a whitelisted address.
@@ -192,24 +226,18 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             )
         })
 
-    const walletClients = {
-        private: args.sendTransactionRpcUrl
-            ? createWalletClient({
-                  transport: fallback(
-                      [
-                          createWalletTransport(args.sendTransactionRpcUrl),
-                          createWalletTransport(args.rpcUrl)
-                      ],
-                      { rank: false }
-                  ),
-                  chain
-              })
-            : undefined,
-        public: createWalletClient({
-            transport: createWalletTransport(args.rpcUrl),
-            chain
-        })
-    }
+    const walletClient = createWalletClient({
+        transport: args.sendTransactionRpcUrl
+            ? fallback(
+                  [
+                      createWalletTransport(args.sendTransactionRpcUrl),
+                      createWalletTransport(args.rpcUrl)
+                  ],
+                  { rank: false }
+              )
+            : createWalletTransport(args.rpcUrl),
+        chain
+    })
 
     // if flag is set, use utility wallet to deploy the simulations contract
     if (args.deploySimulationsContract) {
@@ -222,8 +250,6 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
             deployedContracts.entrypointSimulationContractV7
         args.entrypointSimulationContractV8 =
             deployedContracts.entrypointSimulationContractV8
-        args.entrypointSimulationContractV9 =
-            deployedContracts.entrypointSimulationContractV9
         args.pimlicoSimulationContract =
             deployedContracts.pimlicoSimulationContract
         logger.info(
@@ -232,8 +258,6 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
                     deployedContracts.entrypointSimulationContractV7,
                 entrypointSimulationContractV8:
                     deployedContracts.entrypointSimulationContractV8,
-                entrypointSimulationContractV9:
-                    deployedContracts.entrypointSimulationContractV9,
                 pimlicoSimulationContract:
                     deployedContracts.pimlicoSimulationContract
             },
@@ -241,13 +265,7 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         )
     }
 
-    const config = createConfig({
-        ...args,
-        logger,
-        publicClient,
-        walletClients,
-        enableCors
-    })
+    const config = createConfig({ ...args, logger, publicClient, walletClient })
 
     const gasPriceManager = new GasPriceManager(config)
 
@@ -263,19 +281,20 @@ export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
         metrics
     })
 
-    metrics.executorWalletsMinBalance.set(
-        formatNativeBalance({
-            value: config.minExecutorBalance || 0n,
-            config
-        })
-    )
+    const utilityWalletAddress = config.utilityPrivateKey?.address
 
-    const numExecutors = senderManager.getAllWallets().length
-    metrics.executorWalletsRequiredBalance.set(
-        formatNativeBalance({
-            value: (config.minExecutorBalance || 0n) * BigInt(numExecutors),
-            config
+    if (utilityWalletAddress && config.utilityWalletMonitor) {
+        const utilityWalletMonitor = new UtilityWalletMonitor({
+            config,
+            metrics,
+            utilityWalletAddress
         })
+
+        await utilityWalletMonitor.start()
+    }
+
+    metrics.executorWalletsMinBalance.set(
+        Number.parseFloat(formatEther(config.minExecutorBalance || 0n))
     )
 
     await setupServer({

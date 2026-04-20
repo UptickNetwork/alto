@@ -21,22 +21,15 @@ export type BundleNotFound = {
     status: "not_found"
 }
 
-export type BundleInternalError = {
-    status: "internal_error"
-    error: string
-}
-
 export type BundleStatus<
-    status extends "included" | "reverted" | "not_found" | "internal_error" =
+    status extends "included" | "reverted" | "not_found" =
         | "included"
         | "reverted"
         | "not_found"
-        | "internal_error"
 > =
     | (status extends "included" ? BundleIncluded : never)
     | (status extends "reverted" ? BundleReverted : never)
     | (status extends "not_found" ? BundleNotFound : never)
-    | (status extends "internal_error" ? BundleInternalError : never)
 
 // Return the status of the bundling transaction.
 export const getBundleStatus = async ({

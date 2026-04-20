@@ -1,134 +1,11 @@
-import type { Logger, Metrics } from "@alto/utils"
-import { formatNativeBalance, scaleBigIntByPercent } from "@alto/utils"
-import Redis from "ioredis"
-import {
-    type Account,
-    type Address,
-    BaseError,
-    type Hex,
-    InsufficientFundsError,
-    encodeFunctionData,
-    erc20Abi
-} from "viem"
-import { Addresses as TempoAddresses } from "viem/tempo"
+import { CallEngineAbi, type HexData } from "@alto/types"
+import type { Metrics } from "@alto/utils"
+import { type Address, formatEther, getContract } from "viem"
 import type { SenderManager } from "."
 import type { AltoConfig } from "../../createConfig"
 import type { GasPriceManager } from "../../handlers/gasPriceManager"
 
-let redisClient: Redis | null = null
-
-// Returns the wallet balance using ERC20 balanceOf for Tempo,
-// native getBalance otherwise.
-const getWalletBalance = async ({
-    config,
-    address
-}: {
-    config: AltoConfig
-    address: Address
-}): Promise<bigint> => {
-    if (config.chainType === "tempo") {
-        return await config.publicClient.readContract({
-            address: TempoAddresses.pathUsd,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [address]
-        })
-    }
-    return await config.publicClient.getBalance({ address })
-}
-
-// Transfers funds to a wallet. Uses ERC20 transfer for Tempo,
-// native value transfer otherwise.
-const transferBalance = async ({
-    config,
-    from,
-    to,
-    amount,
-    maxFeePerGas,
-    maxPriorityFeePerGas
-}: {
-    config: AltoConfig
-    from: Account
-    to: Address
-    amount: bigint
-    maxFeePerGas: bigint
-    maxPriorityFeePerGas: bigint
-}): Promise<Hex> => {
-    if (config.chainType === "tempo") {
-        const data = encodeFunctionData({
-            abi: erc20Abi,
-            functionName: "transfer",
-            args: [to, amount]
-        })
-
-        return await config.walletClients.public.sendTransaction({
-            account: from,
-            to: TempoAddresses.pathUsd,
-            data,
-            maxFeePerGas,
-            maxPriorityFeePerGas
-        })
-    }
-
-    return config.legacyTransactions
-        ? await config.walletClients.public.sendTransaction({
-              account: from,
-              to,
-              value: amount,
-              gasPrice: maxFeePerGas
-          })
-        : await config.walletClients.public.sendTransaction({
-              account: from,
-              to,
-              value: amount,
-              maxFeePerGas,
-              maxPriorityFeePerGas
-          })
-}
-
-// Checks executor balance and refills to 120% of minBalance if below threshold.
-const sendRefillTransaction = async ({
-    config,
-    utilityAccount,
-    executorAddress,
-    minBalance,
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-    logger
-}: {
-    config: AltoConfig
-    utilityAccount: Account
-    executorAddress: Address
-    minBalance: bigint
-    maxFeePerGas: bigint
-    maxPriorityFeePerGas: bigint
-    logger: Logger
-}) => {
-    const balance = await getWalletBalance({ config, address: executorAddress })
-
-    if (balance >= minBalance) {
-        return
-    }
-
-    // Top up to 120% of minBalance
-    const refillAmount = scaleBigIntByPercent(minBalance, 120n) - balance
-
-    const txHash = await transferBalance({
-        config,
-        from: utilityAccount,
-        to: executorAddress,
-        amount: refillAmount,
-        maxFeePerGas,
-        maxPriorityFeePerGas
-    })
-
-    await config.publicClient.waitForTransactionReceipt({
-        hash: txHash
-    })
-
-    logger.info({ txHash, executorAddress, refillAmount }, "refilled wallet")
-}
-
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: <explanation>
 export const validateAndRefillWallets = async ({
     metrics,
     config,
@@ -151,107 +28,145 @@ export const validateAndRefillWallets = async ({
         return
     }
 
-    // With horizontal scaling, use a Redis SET NX lock so only one instance
-    // performs the balance check/refill per interval. Fail-open on Redis errors.
-    if (config.enableHorizontalScaling && config.redisEndpoint) {
-        if (!redisClient) {
-            redisClient = new Redis(config.redisEndpoint)
-        }
+    const utilityWalletBalance = await config.publicClient.getBalance({
+        address: utilityAccount.address
+    })
 
-        const acquired = await redisClient
-            .set(
-                `${config.redisKeyPrefix}:${config.chainId}:wallet-refill-lock`,
-                "1",
-                "EX",
-                Math.floor(config.executorRefillInterval / 2),
-                "NX"
-            )
-            .catch((err: unknown) => {
-                logger.warn(
-                    { err },
-                    "Redis lock check failed, proceeding with update"
-                )
-                return "OK"
-            })
-
-        if (acquired !== "OK") {
-            return
-        }
-    }
+    const balancesMissing: Record<Address, bigint> = {}
 
     const allWallets = senderManager.getAllWallets()
-
-    // Fetch gasPrice once and bump by 200% to account for fluctuations
-    const gasPrice = await gasPriceManager.tryGetNetworkGasPrice({
-        forExecutor: true
-    })
-    const maxFeePerGas = scaleBigIntByPercent(gasPrice.maxFeePerGas, 200n)
-    const maxPriorityFeePerGas = scaleBigIntByPercent(
-        gasPrice.maxPriorityFeePerGas,
-        200n
-    )
-
-    for (const wallet of allWallets) {
-        try {
-            await sendRefillTransaction({
-                config,
-                utilityAccount,
-                executorAddress: wallet.address,
-                minBalance,
-                maxFeePerGas,
-                maxPriorityFeePerGas,
-                logger
-            })
-        } catch (e) {
-            if (e instanceof BaseError) {
-                const isInsufficientFunds = e.walk(
-                    (err) => err instanceof InsufficientFundsError
-                )
-                if (isInsufficientFunds) {
-                    logger.warn(
-                        { executor: wallet.address },
-                        "insufficient utility funds"
-                    )
-                    break
-                }
-            }
-            logger.error({ err: e }, "failed to refill wallet")
-        }
-    }
-
-    let remainingMissing = 0n
-    for (const wallet of allWallets) {
-        const balance = await getWalletBalance({
-            config,
+    const balanceRequestPromises = allWallets.map(async (wallet) => {
+        const balance = await config.publicClient.getBalance({
             address: wallet.address
         })
 
         metrics.executorWalletsBalances.set(
-            { wallet: wallet.address },
-            formatNativeBalance({ value: balance, config })
+            {
+                wallet: wallet.address
+            },
+            Number.parseFloat(formatEther(balance))
         )
 
         if (balance < minBalance) {
-            remainingMissing += minBalance - balance
+            const missingBalance = (minBalance * 6n) / 5n - balance
+            balancesMissing[wallet.address] = missingBalance
         }
-    }
-
-    if (remainingMissing === 0n) {
-        logger.info("no wallets need to be refilled")
-        metrics.utilityWalletInsufficientBalance.set(0)
-        metrics.utilityWalletMissingBalance.set(0)
-    } else {
-        metrics.utilityWalletInsufficientBalance.set(1)
-        metrics.utilityWalletMissingBalance.set(
-            formatNativeBalance({ value: remainingMissing, config })
-        )
-    }
-
-    const utilityBalance = await getWalletBalance({
-        config,
-        address: utilityAccount.address
     })
-    metrics.utilityWalletBalance.set(
-        formatNativeBalance({ value: utilityBalance, config })
+
+    await Promise.all(balanceRequestPromises)
+
+    const totalBalanceMissing = Object.values(balancesMissing).reduce(
+        (a, b) => a + b,
+        0n
     )
+    if (utilityWalletBalance < (totalBalanceMissing * 11n) / 10n) {
+        logger.info(
+            { balancesMissing, totalBalanceMissing },
+            "balances missing"
+        )
+        metrics.utilityWalletInsufficientBalance.set(1)
+        logger.error(
+            {
+                minBalance: formatEther(minBalance),
+                utilityWalletBalance: formatEther(utilityWalletBalance),
+                totalBalanceMissing: formatEther(totalBalanceMissing),
+                minRefillAmount: formatEther(
+                    totalBalanceMissing - utilityWalletBalance
+                ),
+                utilityAccount: utilityAccount.address
+            },
+            "utility wallet has insufficient balance to refill wallets"
+        )
+        return
+    }
+
+    metrics.utilityWalletInsufficientBalance.set(0)
+
+    if (Object.keys(balancesMissing).length > 0) {
+        let maxFeePerGas: bigint
+        let maxPriorityFeePerGas: bigint
+        try {
+            const gasPriceParameters =
+                await gasPriceManager.tryGetNetworkGasPrice()
+
+            maxFeePerGas = gasPriceParameters.maxFeePerGas
+            maxPriorityFeePerGas = gasPriceParameters.maxPriorityFeePerGas
+        } catch (e) {
+            logger.error(e, "No gas price available")
+            return
+        }
+
+        if (config.refillHelperContract) {
+            const instructions: {
+                to: Address
+                value: bigint
+                data: HexData
+            }[] = []
+            for (const [address, missingBalance] of Object.entries(
+                balancesMissing
+            )) {
+                instructions.push({
+                    to: address as Address,
+                    value: missingBalance,
+                    data: "0x" as HexData
+                })
+            }
+
+            const callEngine = getContract({
+                abi: CallEngineAbi,
+                address: config.refillHelperContract,
+                client: {
+                    public: config.publicClient,
+                    wallet: config.walletClient
+                }
+            })
+            const tx = await callEngine.write.execute([instructions], {
+                account: utilityAccount,
+                value: totalBalanceMissing,
+                maxFeePerGas: maxFeePerGas * 2n,
+                maxPriorityFeePerGas: maxPriorityFeePerGas * 2n
+            })
+
+            await config.publicClient.waitForTransactionReceipt({ hash: tx })
+
+            for (const [address, missingBalance] of Object.entries(
+                balancesMissing
+            )) {
+                logger.info(
+                    { tx, executor: address, missingBalance },
+                    "refilled wallet"
+                )
+            }
+        } else {
+            for (const [address, missingBalance] of Object.entries(
+                balancesMissing
+            )) {
+                const tx = await config.walletClient.sendTransaction({
+                    account: utilityAccount,
+                    // @ts-ignore
+                    to: address,
+                    value: missingBalance,
+                    maxFeePerGas: config.legacyTransactions
+                        ? undefined
+                        : maxFeePerGas,
+                    maxPriorityFeePerGas: config.legacyTransactions
+                        ? undefined
+                        : maxPriorityFeePerGas,
+                    gasPrice: config.legacyTransactions
+                        ? maxFeePerGas
+                        : undefined
+                })
+
+                await config.publicClient.waitForTransactionReceipt({
+                    hash: tx
+                })
+                logger.info(
+                    { tx, executor: address, missingBalance },
+                    "refilled wallet"
+                )
+            }
+        }
+    } else {
+        logger.info("no wallets need to be refilled")
+    }
 }

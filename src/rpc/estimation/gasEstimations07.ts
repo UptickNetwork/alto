@@ -1,18 +1,15 @@
 import type { GasPriceManager } from "@alto/handlers"
 import {
-    ERC7769Errors,
+    ExecutionErrors,
     RpcError,
     type StateOverrides,
-    type UserOperation07,
+    type UserOperationV07,
+    ValidationErrors,
     pimlicoSimulationsAbi
 } from "@alto/types"
-import {
-    type Logger,
-    getEntryPointSimulationsAddress,
-    getViemEntryPointVersion,
-    toPackedUserOp
-} from "@alto/utils"
-import { type Address, type Hex, type StateOverride, getContract } from "viem"
+import { type Logger, isVersion08, toPackedUserOp } from "@alto/utils"
+import type { Hex } from "viem"
+import { type Address, type StateOverride, getContract } from "viem"
 import type { AltoConfig } from "../../createConfig"
 import { packUserOps } from "../../executor/utils"
 import {
@@ -39,9 +36,9 @@ type SimulateHandleOpSuccessResult = {
 }
 
 export class GasEstimator07 {
-    private readonly config: AltoConfig
-    private readonly logger: Logger
-    private readonly gasPriceManager: GasPriceManager
+    private config: AltoConfig
+    private logger: Logger
+    private gasPriceManager: GasPriceManager
 
     constructor(config: AltoConfig, gasPriceManager: GasPriceManager) {
         this.config = config
@@ -58,16 +55,17 @@ export class GasEstimator07 {
 
     private getSimulationContracts(
         entryPoint: Address,
-        userOp: UserOperation07
+        userOp: UserOperationV07
     ) {
-        const version = getViemEntryPointVersion(userOp, entryPoint)
-        const epSimulationsAddress = getEntryPointSimulationsAddress({
-            version,
-            config: this.config
-        })
+        const is08 = isVersion08(userOp, entryPoint)
+        const epSimulationsAddress = is08
+            ? this.config.entrypointSimulationContractV8
+            : this.config.entrypointSimulationContractV7
 
         if (!epSimulationsAddress) {
-            const errorMsg = `Cannot find entryPointSimulations Address for version ${version}`
+            const errorMsg = `Cannot find entryPointSimulations Address for version ${
+                is08 ? "08" : "07"
+            }`
             this.logger.warn(errorMsg)
             throw new Error(errorMsg)
         }
@@ -76,7 +74,7 @@ export class GasEstimator07 {
             this.logger.warn("pimlicoSimulation must be provided")
             throw new RpcError(
                 "pimlicoSimulation must be provided",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -105,8 +103,8 @@ export class GasEstimator07 {
             | "binarySearchVerificationGas"
             | "binarySearchPaymasterVerificationGas"
             | "binarySearchCallGas"
-        queuedUserOps: UserOperation07[]
-        targetUserOp: UserOperation07
+        queuedUserOps: UserOperationV07[]
+        targetUserOp: UserOperationV07
         stateOverride?: StateOverride
         retryCount?: number
         initialMinGas?: bigint
@@ -114,14 +112,17 @@ export class GasEstimator07 {
     }): Promise<SimulateBinarySearchResult> {
         const { pimlicoSimulation, epSimulationsAddress } =
             this.getSimulationContracts(entryPoint, targetUserOp)
-
         // Check if we've hit the retry limit
         if (retryCount > this.config.binarySearchMaxRetries) {
             this.logger.warn(
                 { methodName, retryCount },
                 "Max retries reached in binary search"
             )
-            throw new Error(`Max retries reached when calling ${methodName}`)
+            return {
+                result: "failed",
+                data: `Max retries reached when calling ${methodName}`,
+                code: ValidationErrors.SimulateValidation
+            }
         }
 
         const packedQueuedOps = packUserOps(queuedUserOps)
@@ -177,25 +178,18 @@ export class GasEstimator07 {
             return {
                 result: "failed",
                 data: result.successData.returnData,
-                code: ERC7769Errors.UserOperationReverted
+                code: ExecutionErrors.UserOperationReverted
             }
         } catch (error) {
-            const decoded = decodeSimulateHandleOpError(error, this.logger)
-
-            if (decoded.result === "failed") {
-                return {
-                    result: "failed",
-                    data: decoded.data,
-                    code: decoded.code
-                }
-            }
-
             this.logger.warn(
                 { err: error, methodName },
                 "Error in performBinarySearch"
             )
-
-            throw new Error("Error in performBinarySearch")
+            return {
+                result: "failed",
+                data: "Unknown error, could not parse target call data result.",
+                code: ExecutionErrors.UserOperationReverted
+            } as const
         }
     }
 
@@ -206,8 +200,8 @@ export class GasEstimator07 {
         stateOverride
     }: {
         entryPoint: Address
-        queuedUserOps: UserOperation07[]
-        targetUserOp: UserOperation07
+        queuedUserOps: UserOperationV07[]
+        targetUserOp: UserOperationV07
         stateOverride?: StateOverride
     }): Promise<SimulateHandleOpResult> {
         const { pimlicoSimulation, epSimulationsAddress } =
@@ -236,7 +230,12 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            return decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            this.logger.warn(
+                { err: error, data: decodedError.data },
+                "Contract function reverted in executeSimulateHandleOp"
+            )
+            return decodedError
         }
     }
 
@@ -248,8 +247,8 @@ export class GasEstimator07 {
         retryCount = 0
     }: {
         entryPoint: Address
-        queuedUserOps: UserOperation07[]
-        targetUserOp: UserOperation07
+        queuedUserOps: UserOperationV07[]
+        targetUserOp: UserOperationV07
         stateOverride?: StateOverride
         retryCount?: number
     }): Promise<
@@ -328,7 +327,7 @@ export class GasEstimator07 {
                 return {
                     result: "failed",
                     data: verificationGasLimit.successData.returnData,
-                    code: ERC7769Errors.UserOperationReverted
+                    code: ExecutionErrors.UserOperationReverted
                 }
             }
 
@@ -367,7 +366,7 @@ export class GasEstimator07 {
                 return {
                     result: "failed",
                     data: paymasterVerificationGasLimit.successData.returnData,
-                    code: ERC7769Errors.UserOperationReverted
+                    code: ExecutionErrors.UserOperationReverted
                 }
             }
 
@@ -379,6 +378,10 @@ export class GasEstimator07 {
             }
         } catch (error) {
             const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            this.logger.warn(
+                { err: error, data: decodedError.data },
+                "Contract function reverted in simulateValidation"
+            )
             return decodedError as {
                 result: "failed"
                 data: string
@@ -393,8 +396,8 @@ export class GasEstimator07 {
         queuedUserOps
     }: {
         entryPoint: Address
-        userOp: UserOperation07
-        queuedUserOps: UserOperation07[]
+        userOp: UserOperationV07
+        queuedUserOps: UserOperationV07[]
     }) {
         const { epSimulationsAddress, pimlicoSimulation } =
             this.getSimulationContracts(entryPoint, userOp)
@@ -425,7 +428,12 @@ export class GasEstimator07 {
                 data: result
             }
         } catch (error) {
-            return decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            this.logger.warn(
+                { err: error, data: decodedError.data },
+                "Contract function reverted in simulateValidation"
+            )
+            return decodedError
         }
     }
 
@@ -436,9 +444,9 @@ export class GasEstimator07 {
         stateOverrides = {}
     }: {
         entryPoint: Address
-        userOp: UserOperation07
-        queuedUserOps: UserOperation07[]
-        stateOverrides?: StateOverrides
+        userOp: UserOperationV07
+        queuedUserOps: UserOperationV07[]
+        stateOverrides?: StateOverrides | undefined
     }): Promise<SimulateHandleOpResult> {
         const { epSimulationsAddress, pimlicoSimulation } =
             this.getSimulationContracts(entryPoint, userOp)
@@ -446,7 +454,7 @@ export class GasEstimator07 {
         const viemStateOverride = await prepareSimulationOverrides07({
             userOp,
             queuedUserOps,
-            entryPoint,
+            epSimulationsAddress,
             gasPriceManager: this.gasPriceManager,
             userStateOverrides: stateOverrides,
             config: this.config
@@ -477,7 +485,12 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            return decodeSimulateHandleOpError(error, this.logger)
+            const decodedError = decodeSimulateHandleOpError(error, this.logger)
+            this.logger.warn(
+                { err: error, data: decodedError.data },
+                "Contract function reverted in validateHandleOpV07"
+            )
+            return decodedError
         }
     }
 
@@ -488,14 +501,19 @@ export class GasEstimator07 {
         userStateOverrides = {}
     }: {
         entryPoint: Address
-        userOp: UserOperation07
-        queuedUserOps: UserOperation07[]
-        userStateOverrides?: StateOverrides
+        userOp: UserOperationV07
+        queuedUserOps: UserOperationV07[]
+        userStateOverrides?: StateOverrides | undefined
     }): Promise<SimulateHandleOpResult> {
+        const { epSimulationsAddress } = this.getSimulationContracts(
+            entryPoint,
+            userOp
+        )
+
         const viemStateOverride = await prepareSimulationOverrides07({
             userOp,
             queuedUserOps,
-            entryPoint,
+            epSimulationsAddress,
             gasPriceManager: this.gasPriceManager,
             userStateOverrides: userStateOverrides,
             config: this.config

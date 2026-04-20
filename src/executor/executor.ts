@@ -26,15 +26,15 @@ import {
     IntrinsicGasTooLowError,
     NonceTooHighError,
     NonceTooLowError,
-    type SendTransactionErrorType,
-    type SignedAuthorizationList,
     TransactionExecutionError
 } from "viem"
+import type { SendTransactionErrorType } from "viem"
+import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
 import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import {
     encodeHandleOpsCalldata,
-    getAuthorizationListFromUserOps,
+    getAuthorizationList,
     getUserOpHashes,
     isTransactionUnderpricedError
 } from "./utils"
@@ -108,19 +108,8 @@ export class Executor {
             resubmitMultiplierCeiling,
             legacyTransactions,
             chainType,
-            arbitrumBaseFeeMultiplier,
-            skipLocalGasCalculations
+            arbitrumGasBidMultiplier
         } = this.config
-
-        // If skipLocalGasCalculations is enabled, use network gas price directly.
-        // On chains where bundleGasUsed is underestimated, local calculations
-        // inflate the break-even gas price resulting in bundles at a loss.
-        if (skipLocalGasCalculations) {
-            return {
-                maxFeePerGas: networkGasPrice.maxFeePerGas,
-                maxPriorityFeePerGas: networkGasPrice.maxPriorityFeePerGas
-            }
-        }
 
         // Arbtirum's sequencer orders based on first come first serve.
         // Because of this, maxFee/maxPriorityFee is ignored and the bundler *always* pays the network's baseFee.
@@ -133,14 +122,8 @@ export class Executor {
             )
 
             return {
-                maxFeePerGas: scaleBigIntByPercent(
-                    scaledBaseFee,
-                    arbitrumBaseFeeMultiplier
-                ),
-                maxPriorityFeePerGas: scaleBigIntByPercent(
-                    scaledBaseFee,
-                    arbitrumBaseFeeMultiplier
-                )
+                maxFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier,
+                maxPriorityFeePerGas: scaledBaseFee * arbitrumGasBidMultiplier
             }
         }
 
@@ -205,31 +188,18 @@ export class Executor {
 
     async sendHandleOpsTransaction({
         txParam,
-        gasOpts,
-        childLogger,
-        submissionAttempts
+        gasOpts
     }: {
         txParam: HandleOpsTxParams
         gasOpts: HandleOpsGasParams
-        childLogger: Logger
-        submissionAttempts: number
     }) {
         const {
             executorGasMultiplier,
             sendHandleOpsRetryCount,
             transactionUnderpricedMultiplier,
-            walletClients,
-            publicClient,
-            privateEndpointSubmissionAttempts
+            walletClient,
+            publicClient
         } = this.config
-
-        // Use private wallet for configured number of attempts if available, then switch to public
-        const usePrivateEndpoint =
-            walletClients.private &&
-            submissionAttempts < privateEndpointSubmissionAttempts
-        const walletClient = usePrivateEndpoint
-            ? walletClients.private
-            : walletClients.public
 
         const { entryPoint, userOps, account, gas, nonce } = txParam
 
@@ -266,25 +236,11 @@ export class Executor {
 
                 transactionHash = await walletClient.sendTransaction(request)
 
-                childLogger.info(
-                    {
-                        transactionRequest: {
-                            executor: request.account.address,
-                            maxFeePerGas: request.maxFeePerGas,
-                            maxPriorityFeePerGas: request.maxPriorityFeePerGas,
-                            nonce: request.nonce
-                        },
-                        txHash: transactionHash,
-                        isPrivate: usePrivateEndpoint
-                    },
-                    "submitted bundle transaction"
-                )
-
                 break
             } catch (e: unknown) {
                 if (e instanceof BaseError) {
                     if (isTransactionUnderpricedError(e)) {
-                        childLogger.warn("Transaction underpriced, retrying")
+                        this.logger.warn("Transaction underpriced, retrying")
 
                         request.nonce = await publicClient.getTransactionCount({
                             address: account.address,
@@ -315,7 +271,7 @@ export class Executor {
                 }
 
                 if (e instanceof FeeCapTooLowError) {
-                    childLogger.warn("max fee < basefee, retrying")
+                    this.logger.warn("max fee < basefee, retrying")
 
                     if (request.gasPrice) {
                         request.gasPrice = scaleBigIntByPercent(
@@ -345,7 +301,7 @@ export class Executor {
                     const cause = error.cause
 
                     if (cause instanceof NonceTooLowError) {
-                        childLogger.warn("Nonce too low, retrying")
+                        this.logger.warn("Nonce too low, retrying")
                         request.nonce = await publicClient.getTransactionCount({
                             address: request.from,
                             blockTag: "latest"
@@ -353,7 +309,7 @@ export class Executor {
                     }
 
                     if (cause instanceof NonceTooHighError) {
-                        childLogger.warn("Nonce too high, retrying")
+                        this.logger.warn("Nonce too high, retrying")
                         request.nonce = await publicClient.getTransactionCount({
                             address: request.from,
                             blockTag: "latest"
@@ -361,7 +317,7 @@ export class Executor {
                     }
 
                     if (cause instanceof IntrinsicGasTooLowError) {
-                        childLogger.warn("Intrinsic gas too low, retrying")
+                        this.logger.warn("Intrinsic gas too low, retrying")
                         request.gas = scaleBigIntByPercent(request.gas, 150n)
                     }
                 }
@@ -397,14 +353,14 @@ export class Executor {
     }): Promise<BundleResult> {
         const { entryPoint, userOps } = userOpBundle
 
+        const isReplacementTx = userOpBundle.submissionAttempts > 0
         let childLogger = this.logger.child({
-            submissionAttempts: userOpBundle.submissionAttempts,
+            isReplacementTx,
             userOperations: getUserOpHashes(userOps),
             entryPoint
         })
 
         const filterOpsResult = await filterOpsAndEstimateGas({
-            checkEip7702AuthNonces: false, // Ignore EIP-7702 auth nonce check to save latency.
             networkBaseFee,
             userOpBundle,
             config: this.config,
@@ -443,8 +399,8 @@ export class Executor {
 
         // Update child logger with userOperations being sent for bundling.
         childLogger = this.logger.child({
-            userOps: getUserOpHashes(userOpsToBundle),
-            submissionAttempts: userOpBundle.submissionAttempts,
+            isReplacementTx,
+            userOperations: getUserOpHashes(userOpsToBundle),
             entryPoint
         })
 
@@ -459,9 +415,7 @@ export class Executor {
         let transactionHash: HexData32
         try {
             const isLegacyTransaction = this.config.legacyTransactions
-            const authorizationList = getAuthorizationListFromUserOps(
-                userOpsToBundle.map(({ userOp }) => userOp)
-            )
+            const authorizationList = getAuthorizationList(userOpsToBundle)
 
             let gasOpts: HandleOpsGasParams
             if (isLegacyTransaction) {
@@ -492,9 +446,7 @@ export class Executor {
                     userOps: userOpsToBundle,
                     entryPoint
                 },
-                childLogger,
-                gasOpts,
-                submissionAttempts: userOpBundle.submissionAttempts
+                gasOpts
             })
 
             this.eventManager.emitSubmitted({
@@ -571,6 +523,15 @@ export class Executor {
                 nonce
             }
         }
+
+        childLogger.info(
+            {
+                transactionRequest: bundleResult.transactionRequest,
+                txHash: transactionHash,
+                opHashes: getUserOpHashes(userOpsBundled)
+            },
+            "submitted bundle transaction"
+        )
 
         return bundleResult
     }

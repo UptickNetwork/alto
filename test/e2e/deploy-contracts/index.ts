@@ -11,15 +11,12 @@ import {
     ENTRY_POINT_V06_CREATECALL,
     ENTRY_POINT_V07_CREATECALL,
     ENTRY_POINT_V08_CREATECALL,
-    ENTRY_POINT_V09_CREATECALL,
     SIMPLE_7702_ACCOUNT_IMPLEMENTATION_V06_CREATECALL,
     SIMPLE_7702_ACCOUNT_IMPLEMENTATION_V07_CREATECALL,
     SIMPLE_7702_ACCOUNT_IMPLEMENTATION_V08_CREATECALL,
-    SIMPLE_7702_ACCOUNT_IMPLEMENTATION_V09_CREATECALL,
     SIMPLE_ACCOUNT_FACTORY_V06_CREATECALL,
     SIMPLE_ACCOUNT_FACTORY_V07_CREATECALL,
-    SIMPLE_ACCOUNT_FACTORY_V08_CREATECALL,
-    SIMPLE_ACCOUNT_FACTORY_V09_CREATECALL
+    SIMPLE_ACCOUNT_FACTORY_V08_CREATECALL
 } from "./constants.js"
 
 const DETERMINISTIC_DEPLOYER = "0x4e59b44847b379578588920ca78fbf26c0b4956c"
@@ -54,19 +51,6 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
     const client = createPublicClient({
         transport: http(anvilRpc)
     })
-
-    walletClient
-        .sendTransaction({
-            to: DETERMINISTIC_DEPLOYER,
-            data: SIMPLE_7702_ACCOUNT_IMPLEMENTATION_V09_CREATECALL,
-            gas: 15_000_000n,
-            nonce: nonce++
-        })
-        .then(() =>
-            console.log(
-                "[7702] Deploying Simple7702AccountImplementation (0.9)"
-            )
-        )
 
     walletClient
         .sendTransaction({
@@ -110,29 +94,11 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
     walletClient
         .sendTransaction({
             to: DETERMINISTIC_DEPLOYER,
-            data: ENTRY_POINT_V09_CREATECALL,
-            gas: 15_000_000n,
-            nonce: nonce++
-        })
-        .then(() => console.log("[0.9 CORE] Deploying EntryPoint"))
-
-    walletClient
-        .sendTransaction({
-            to: DETERMINISTIC_DEPLOYER,
-            data: SIMPLE_ACCOUNT_FACTORY_V09_CREATECALL,
-            gas: 15_000_000n,
-            nonce: nonce++
-        })
-        .then(() => console.log("[0.9 CORE] Deploying SimpleAccountFactory"))
-
-    walletClient
-        .sendTransaction({
-            to: DETERMINISTIC_DEPLOYER,
             data: ENTRY_POINT_V08_CREATECALL,
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.8 CORE] Deploying EntryPoint"))
+        .then(() => console.log("[V0.8 CORE] Deploying EntryPoint"))
 
     walletClient
         .sendTransaction({
@@ -141,7 +107,7 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.8 CORE] Deploying SimpleAccountFactory"))
+        .then(() => console.log("[V0.8 CORE] Deploying SimpleAccountFactory"))
 
     walletClient
         .sendTransaction({
@@ -150,7 +116,7 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.7 CORE] Deploying EntryPoint"))
+        .then(() => console.log("[V0.7 CORE] Deploying EntryPoint"))
 
     walletClient
         .sendTransaction({
@@ -159,7 +125,7 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.7 CORE] Deploying SimpleAccountFactory"))
+        .then(() => console.log("[V0.7 CORE] Deploying SimpleAccountFactory"))
 
     walletClient
         .sendTransaction({
@@ -168,7 +134,7 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.6 CORE] Deploying EntryPoint"))
+        .then(() => console.log("[V0.6 CORE] Deploying EntryPoint"))
 
     walletClient
         .sendTransaction({
@@ -177,7 +143,7 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
             gas: 15_000_000n,
             nonce: nonce++
         })
-        .then(() => console.log("[0.6 CORE] Deploying SimpleAccountFactory"))
+        .then(() => console.log("[V0.6 CORE] Deploying SimpleAccountFactory"))
 
     // Wait for all deploy/setup txs to be mined.
     let onchainNonce = 0
@@ -194,9 +160,6 @@ export async function setupContracts({ anvilRpc }: { anvilRpc: string }) {
         client,
         addresses: [
             "0x4e59b44847b379578588920ca78fbf26c0b4956c", // Deterministic deployer
-            "0x433709009b8330fda32311df1c2afa402ed8d009", // EntryPoint 0.9
-            "0xf4a7018fdbf22804526ec4b77dce4f9b0d27a395", // SimpleAccountFactory 0.9
-            "0xa46cc63eBF4Bd77888AA327837d20b23A63a56B5", // Simple7702Account Implementation 0.9
             "0x4337084d9e255ff0702461cf8895ce9e3b5ff108", // EntryPoint 0.8
             "0x13E9ed32155810FDbd067D4522C492D6f68E5944", // SimpleAccountFactory 0.8
             "0xe6Cae83BdE06E4c305530e199D7217f42808555B", // Simple7702Account Implementation 0.8

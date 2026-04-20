@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {IEntryPointFilterOpsOverride08} from "./v08/IEntryPointFilterOpsOverride.sol";
-import {IEntryPointFilterOpsOverride09} from "./v09/IEntryPointFilterOpsOverride.sol";
 import {EntryPointGasEstimationOverride06 as EpGasEstOverride06} from "./v06/EntryPointGasEstimationOverride.sol";
 import {IEntryPointSimulations} from "./IEntryPointSimulations.sol";
 
@@ -12,7 +10,6 @@ import {UserOperation} from "account-abstraction-v6/interfaces/UserOperation.sol
 import {IEntryPoint as IEntryPoint06} from "account-abstraction-v6/interfaces/IEntryPoint.sol";
 import {IEntryPoint as IEntryPoint07} from "account-abstraction-v7/interfaces/IEntryPoint.sol";
 import {IEntryPoint as IEntryPoint08} from "account-abstraction-v8/interfaces/IEntryPoint.sol";
-import {IEntryPoint as IEntryPoint09} from "account-abstraction-v9/interfaces/IEntryPoint.sol";
 
 import {Exec} from "account-abstraction-v7/utils/Exec.sol";
 
@@ -244,33 +241,12 @@ contract PimlicoSimulations {
         RejectedUserOp[] rejectedUserOps;
     }
 
-    // @notice Filter ops method for EntryPoint 0.9
-    // @dev This method should be called by bundler before sending bundle to EntryPoint.
-    function filterOps09(PackedUserOperation[] calldata userOps, address payable beneficiary, IEntryPoint09 entryPoint)
-        external
-        returns (FilterOpsResult memory)
-    {
-        // Initialize the EntryPoint's domain separator.
-        // Try-catch as some RPCs don't support code overrides.
-        // In these cases the standard entryPoint will be used and trying to call initDomainSeparator will revert.
-        try IEntryPointFilterOpsOverride09(payable(address(entryPoint))).initDomainSeparator() {} catch {}
-
-        // 0.7, 0.8, and 0.9 have the same filterOps logic
-        return this.filterOps07(userOps, beneficiary, IEntryPoint07(address(entryPoint)));
-    }
-
     // @notice Filter ops method for EntryPoint 0.8
     // @dev This method should be called by bundler before sending bundle to EntryPoint.
     function filterOps08(PackedUserOperation[] calldata userOps, address payable beneficiary, IEntryPoint08 entryPoint)
         external
         returns (FilterOpsResult memory)
     {
-        // Initialize the EntryPoint's domain separator.
-        // Try-catch as some RPCs don't support code overrides.
-        // In these cases the standard entryPoint will be used and trying to call initDomainSeparator will revert.
-        try IEntryPointFilterOpsOverride08(payable(address(entryPoint))).initDomainSeparator() {} catch {}
-
-        // 0.8 has the same filterOps logic as 0.7
         return this.filterOps07(userOps, beneficiary, IEntryPoint07(address(entryPoint)));
     }
 

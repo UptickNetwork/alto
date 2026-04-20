@@ -4,8 +4,8 @@ import type {
     ReferencedCodeHashes,
     StateOverrides,
     UserOperation,
-    UserOperation06,
-    UserOperation07
+    UserOperationV06,
+    UserOperationV07
 } from "./schemas"
 import type * as validation from "./validation"
 
@@ -15,12 +15,7 @@ export interface InterfaceValidator {
         entryPoint: Address
         queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }): Promise<{
-        callGasLimit: bigint
-        verificationGasLimit: bigint
-        paymasterVerificationGasLimit: bigint | null
-        paymasterPostOpGasLimit: bigint | null
-    }>
+    }): Promise<SimulateHandleOpResult>
 
     getExecutionResult(args: {
         userOp: UserOperation
@@ -29,24 +24,30 @@ export interface InterfaceValidator {
         stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult>
 
-    getValidationResult06(args: {
-        userOp: UserOperation06
+    getValidationResultV06(args: {
+        userOp: UserOperationV06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        validation.ValidationResult & {
+        (
+            | validation.ValidationResult
+            | validation.ValidationResultWithAggregation
+        ) & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     >
 
-    getValidationResult07(args: {
-        userOp: UserOperation07
+    getValidationResultV07(args: {
+        userOp: UserOperationV07
         queuedUserOps: UserOperation[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        validation.ValidationResult & {
+        (
+            | validation.ValidationResult
+            | validation.ValidationResultWithAggregation
+        ) & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -58,7 +59,10 @@ export interface InterfaceValidator {
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        validation.ValidationResult & {
+        (
+            | validation.ValidationResult
+            | validation.ValidationResultWithAggregation
+        ) & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -70,7 +74,10 @@ export interface InterfaceValidator {
         entryPoint: Address
         referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        validation.ValidationResult & {
+        (
+            | validation.ValidationResult
+            | validation.ValidationResultWithAggregation
+        ) & {
             storageMap: validation.StorageMap
             referencedContracts?: ReferencedCodeHashes
         }

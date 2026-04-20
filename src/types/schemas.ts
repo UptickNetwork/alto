@@ -17,7 +17,7 @@ export const hexNumberSchema = z
     .regex(hexDataPattern)
     .or(z.number())
     .or(z.bigint())
-    .transform(BigInt)
+    .transform((val) => BigInt(val))
     .refine((val) => val <= maxUint256, {
         message: "not a valid uint256"
     })
@@ -93,25 +93,25 @@ const partialAuthorizationSchema = z.union([
 const signedAuthorizationSchema = z.union([
     z.object({
         contractAddress: addressSchema,
-        chainId: hexNumberSchema.transform(Number),
-        nonce: hexNumberSchema.transform(Number),
+        chainId: hexNumberSchema.transform((val) => Number(val)),
+        nonce: hexNumberSchema.transform((val) => Number(val)),
         r: hexDataSchema.transform((val) => val as Hex),
         s: hexDataSchema.transform((val) => val as Hex),
         v: hexNumberSchema.optional(),
-        yParity: hexNumberSchema.transform(Number)
+        yParity: hexNumberSchema.transform((val) => Number(val))
     }),
     z.object({
         address: addressSchema,
-        chainId: hexNumberSchema.transform(Number),
-        nonce: hexNumberSchema.transform(Number),
+        chainId: hexNumberSchema.transform((val) => Number(val)),
+        nonce: hexNumberSchema.transform((val) => Number(val)),
         r: hexDataSchema.transform((val) => val as Hex),
         s: hexDataSchema.transform((val) => val as Hex),
         v: hexNumberSchema.optional(),
-        yParity: hexNumberSchema.transform(Number)
+        yParity: hexNumberSchema.transform((val) => Number(val))
     })
 ])
 
-const userOperation06Schema = z
+const userOperationV06Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -131,7 +131,7 @@ const userOperation06Schema = z
         return val
     })
 
-const userOperation07Schema = z
+const userOperationV07Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -171,7 +171,7 @@ const userOperation07Schema = z
     .strict()
     .transform((val) => val)
 
-const userOperation08Schema = z
+const userOperationV08Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -212,52 +212,7 @@ const userOperation08Schema = z
     .strict()
     .transform((val) => val)
 
-const userOperation09Schema = z
-    .object({
-        sender: addressSchema,
-        nonce: hexNumberSchema,
-        factory: z
-            .union([addressSchema, z.literal("0x7702")])
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        factoryData: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        callData: hexDataSchema,
-        callGasLimit: hexNumberSchema,
-        verificationGasLimit: hexNumberSchema,
-        preVerificationGas: hexNumberSchema,
-        maxFeePerGas: hexNumberSchema,
-        maxPriorityFeePerGas: hexNumberSchema,
-        paymaster: addressSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterVerificationGasLimit: hexNumberSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterPostOpGasLimit: hexNumberSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterData: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterSignature: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        signature: hexDataSchema,
-        eip7702Auth: signedAuthorizationSchema.optional().nullable()
-    })
-    .strict()
-    .transform((val) => val)
-
-const partialUserOperation06Schema = z
+const partialUserOperationV06Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -277,7 +232,7 @@ const partialUserOperation06Schema = z
         return val
     })
 
-const partialUserOperation07Schema = z
+const partialUserOperationV07Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -317,7 +272,7 @@ const partialUserOperation07Schema = z
     .strict()
     .transform((val) => val)
 
-const partialUserOperation08Schema = z
+const partialUserOperationV08Schema = z
     .object({
         sender: addressSchema,
         nonce: hexNumberSchema,
@@ -349,51 +304,6 @@ const partialUserOperation08Schema = z
             .optional()
             .transform((val) => val ?? null),
         paymasterData: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        signature: hexDataSchema,
-        eip7702Auth: partialAuthorizationSchema.optional().nullable()
-    })
-    .strict()
-    .transform((val) => val)
-
-const partialUserOperation09Schema = z
-    .object({
-        sender: addressSchema,
-        nonce: hexNumberSchema,
-        factory: z
-            .union([addressSchema, z.literal("0x7702")])
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        factoryData: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        callData: hexDataSchema,
-        callGasLimit: hexNumberSchema.default(1n),
-        verificationGasLimit: hexNumberSchema.default(1n),
-        preVerificationGas: hexNumberSchema.default(1n),
-        maxFeePerGas: hexNumberSchema.default(1n),
-        maxPriorityFeePerGas: hexNumberSchema.default(1n),
-        paymaster: addressSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterVerificationGasLimit: hexNumberSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterPostOpGasLimit: hexNumberSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterData: hexDataSchema
-            .nullable()
-            .optional()
-            .transform((val) => val ?? null),
-        paymasterSignature: hexDataSchema
             .nullable()
             .optional()
             .transform((val) => val ?? null),
@@ -419,32 +329,27 @@ const packerUserOperationSchema = z
     .transform((val) => val)
 
 const partialUserOperationSchema = z.union([
-    partialUserOperation06Schema,
-    partialUserOperation07Schema,
-    partialUserOperation08Schema,
-    partialUserOperation09Schema
+    partialUserOperationV06Schema,
+    partialUserOperationV07Schema,
+    partialUserOperationV08Schema
 ])
 
 export const userOperationSchema = z.union([
-    userOperation06Schema,
-    userOperation07Schema,
-    userOperation08Schema,
-    userOperation09Schema
+    userOperationV06Schema,
+    userOperationV07Schema,
+    userOperationV08Schema
 ])
 
-export type UserOperation06 = z.infer<typeof userOperation06Schema>
-export type UserOperation07 = z.infer<typeof userOperation07Schema>
-export type UserOperation08 = z.infer<typeof userOperation08Schema>
-export type UserOperation09 = z.infer<typeof userOperation09Schema>
+export type UserOperationV06 = z.infer<typeof userOperationV06Schema>
+export type UserOperationV07 = z.infer<typeof userOperationV07Schema>
+export type UserOperationV08 = z.infer<typeof userOperationV08Schema>
 export type PackedUserOperation = z.infer<typeof packerUserOperationSchema>
 export type UserOperation = z.infer<typeof userOperationSchema>
-
-export const rpcIdSchema = z.union([z.number(), z.string(), z.null()])
 
 export const jsonRpcSchema = z
     .object({
         jsonrpc: z.literal("2.0"),
-        id: rpcIdSchema,
+        id: z.number(),
         method: z.string(),
         params: z
             .array(z.unknown())
@@ -456,7 +361,7 @@ export const jsonRpcSchema = z
 const jsonRpcResultSchema = z
     .object({
         jsonrpc: z.literal("2.0"),
-        id: rpcIdSchema,
+        id: z.number(),
         result: z.unknown()
     })
     .strict()
@@ -491,19 +396,21 @@ export const receiptSchema = z.object({
     //type: hexNumberSchema
 })
 
-export const userOperationReceiptSchema = z.object({
-    userOpHash: hexData32Schema,
-    entryPoint: addressSchema,
-    sender: addressSchema,
-    nonce: hexNumberSchema,
-    paymaster: addressSchema.optional(),
-    actualGasCost: hexNumberSchema,
-    actualGasUsed: hexNumberSchema,
-    success: z.boolean(),
-    reason: hexDataSchema.optional(), // revert reason
-    logs: z.array(logSchema),
-    receipt: receiptSchema
-})
+const userOperationReceiptSchema = z
+    .object({
+        userOpHash: hexData32Schema,
+        entryPoint: addressSchema,
+        sender: addressSchema,
+        nonce: hexNumberSchema,
+        paymaster: addressSchema.optional(),
+        actualGasCost: hexNumberSchema,
+        actualGasUsed: hexNumberSchema,
+        success: z.boolean(),
+        reason: hexDataSchema.optional(), // revert reason
+        logs: z.array(logSchema),
+        receipt: receiptSchema
+    })
+    .or(z.null())
 
 export type UserOperationReceipt = z.infer<typeof userOperationReceiptSchema>
 
@@ -616,7 +523,7 @@ export const getUserOperationReceiptSchema = z.object({
             .regex(hexData32Pattern, { message: "Missing/invalid userOpHash" })
             .transform((val) => val as Hex)
     ]),
-    result: userOperationReceiptSchema.or(z.null())
+    result: userOperationReceiptSchema
 })
 
 export const debugClearStateSchema = z.object({
@@ -719,7 +626,7 @@ export const pimlicoGetUserOperationGasPriceSchema = z.object({
 export const pimlicoSendUserOperationNowSchema = z.object({
     method: z.literal("pimlico_sendUserOperationNow"),
     params: z.tuple([userOperationSchema, addressSchema]),
-    result: userOperationReceiptSchema.or(z.null())
+    result: userOperationReceiptSchema
 })
 
 export const pimlicoSimulateAssetChangeSchema = z.object({

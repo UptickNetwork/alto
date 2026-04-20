@@ -9,6 +9,6 @@ export const debugBundlerClearStateHandler = createMethodHandler({
         rpcHandler.mempool.clear()
         rpcHandler.reputationManager.clearEntityCount()
 
-        return "ok" as const
+        return Promise.resolve("ok" as const)
     }
 })

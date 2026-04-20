@@ -6,25 +6,21 @@ export enum BinarySearchResultType {
     OutOfGas = 1
 }
 
-export type SimulateHandleOpFailResult = {
-    result: "failed"
-    data: string
-    code: number
-}
-
-export type SimulateHandleOpSuccessResult = {
-    result: "execution"
-    data: {
-        callGasLimit?: bigint
-        verificationGasLimit?: bigint
-        paymasterVerificationGasLimit?: bigint
-        executionResult: ExecutionResult
-    }
-}
-
 export type SimulateHandleOpResult =
-    | SimulateHandleOpFailResult
-    | SimulateHandleOpSuccessResult
+    | {
+          result: "failed"
+          data: string
+          code: number
+      }
+    | {
+          result: "execution"
+          data: {
+              callGasLimit?: bigint
+              verificationGasLimit?: bigint
+              paymasterVerificationGasLimit?: bigint
+              executionResult: ExecutionResult
+          }
+      }
 
 export type SimulateBinarySearchResult =
     | {

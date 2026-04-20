@@ -1,58 +1,12 @@
 import type { StateOverrides, UserOperation } from "@alto/types"
-import { type SignedAuthorization, concat, formatUnits, getAddress } from "viem"
-import type { AltoConfig } from "../createConfig"
-import { getEip7702AuthAddress } from "./eip7702"
-
-/// Format a native balance value using the chain's decimal precision.
-/// Use this instead of formatEther when recording balance metrics to
-/// support chains with non-18-decimal native currencies (e.g. Tempo = 6).
-export const formatNativeBalance = ({
-    value,
-    config
-}: {
-    value: bigint
-    config: AltoConfig
-}): number => {
-    return Number.parseFloat(formatUnits(value, config.chainNativeDecimals))
-}
+import { BaseError, type RawContractError, concat, getAddress } from "viem"
+import type { SignedAuthorization } from "viem"
 
 /// Convert an object to JSON string, handling bigint values
 export const jsonStringifyWithBigint = (obj: unknown): string => {
     return JSON.stringify(obj, (_key, value) =>
         typeof value === "bigint" ? value.toString() : value
     )
-}
-
-/// Convert an object to JSON string, handling bigint values
-export const recoverableJsonStringifyWithBigint = (obj: unknown): string => {
-    return JSON.stringify(obj, (_key, value) =>
-        typeof value === "bigint"
-            ? {
-                  type: "bigint",
-                  value: value.toString()
-              }
-            : value
-    )
-}
-
-export const recoverableJsonParseWithBigint = (str: string): any => {
-    return JSON.parse(str, (_key, value) => {
-        if (
-            value !== null &&
-            typeof value === "object" &&
-            "type" in value &&
-            value.type === "bigint" &&
-            "value" in value &&
-            typeof value.value === "string"
-        ) {
-            try {
-                return BigInt(value.value)
-            } catch {
-                return value
-            }
-        }
-        return value
-    })
 }
 
 /// Ensure proper equality by converting both addresses into their checksum type
@@ -62,6 +16,14 @@ export const areAddressesEqual = (a: string, b: string) => {
     } catch {
         return false
     }
+}
+
+export function getRevertErrorData(err: unknown) {
+    if (!(err instanceof BaseError)) {
+        return undefined
+    }
+    const error = err.walk() as RawContractError
+    return typeof error?.data === "object" ? error.data?.data : error.data
 }
 
 export function getAAError(errorMsg: string) {
@@ -95,7 +57,10 @@ export function getAuthorizationStateOverrides({
                 ...(overrides[op.sender] || {}),
                 ...getAuthorizationStateOverride({
                     authorization: {
-                        address: getEip7702AuthAddress(op.eip7702Auth),
+                        address:
+                            "address" in op.eip7702Auth
+                                ? op.eip7702Auth.address
+                                : op.eip7702Auth.contractAddress,
                         chainId: op.eip7702Auth.chainId,
                         nonce: op.eip7702Auth.nonce,
                         r: op.eip7702Auth.r,

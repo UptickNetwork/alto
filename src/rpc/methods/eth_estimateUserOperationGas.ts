@@ -1,25 +1,19 @@
 import {
     type Address,
-    ERC7769Errors,
     RpcError,
     type StateOverrides,
     type UserOperation,
+    ValidationErrors,
     estimateUserOperationGasSchema
 } from "@alto/types"
 import { parseEther, toHex } from "viem"
 import { maxBigInt, scaleBigIntByPercent } from "../../utils/bigInt"
 import {
-    deepHexlify,
-    getUserOpHash,
-    isVersion06,
-    isVersion07
-} from "../../utils/userop"
-import { createMethodHandler } from "../createMethodHandler"
-import {
     calcExecutionPvgComponent,
-    calcL2PvgComponent,
-    calcMonadPvg
-} from "../estimation/preVerificationGasCalculator"
+    calcL2PvgComponent
+} from "../../utils/preVerificationGasCalulator"
+import { deepHexlify, isVersion06, isVersion07 } from "../../utils/userop"
+import { createMethodHandler } from "../createMethodHandler"
 import type { RpcHandler } from "../rpcHandler"
 
 type GasEstimateResult =
@@ -93,13 +87,13 @@ const getGasEstimates = async ({
         simulationCallGasLimit,
         simulationPaymasterVerificationGasLimit,
         simulationPaymasterPostOpGasLimit,
+        paymasterGasLimitMultiplier,
         v6CallGasLimitMultiplier,
         v6VerificationGasLimitMultiplier,
         v7VerificationGasLimitMultiplier,
         v7PaymasterVerificationGasLimitMultiplier,
         v7CallGasLimitMultiplier,
-        v7PaymasterPostOpGasLimitMultiplier,
-        callGasLimitFloor
+        v7PaymasterPostOpGasLimitMultiplier
     } = rpcHandler.config
 
     // Create a deep mutable copy of stateOverrides to avoid modifying frozen objects
@@ -112,23 +106,10 @@ const getGasEstimates = async ({
     }
 
     // Get queued userOps.
-    const queuedUserOps = await rpcHandler.mempool.getQueuedOutstandingUserOps({
+    const queuedUserOps = await rpcHandler.mempool.getQueuedOustandingUserOps({
         userOp,
         entryPoint
     })
-
-    // Log queued userOps.
-    if (queuedUserOps.length > 0) {
-        const queuedHashes = queuedUserOps.map((userOp) =>
-            getUserOpHash({
-                userOp,
-                entryPointAddress: entryPoint,
-                chainId: rpcHandler.config.chainId
-            })
-        )
-
-        rpcHandler.logger.info({ queuedHashes }, "Found queuedUserOps")
-    }
 
     const simulationUserOp = {
         ...userOp,
@@ -151,7 +132,7 @@ const getGasEstimates = async ({
 
         // gas estimation simulation is done with maxFeePerGas/maxPriorityFeePerGas = 1.
         // Because of this, sender must have atleast maxGas of wei.
-        const maxGas = parseEther("100000000")
+        const maxGas = parseEther("100")
 
         mutableStateOverrides[sender] = {
             ...deepHexlify(mutableStateOverrides[sender] || {}),
@@ -193,22 +174,42 @@ const getGasEstimates = async ({
 
     let paymasterPostOpGasLimit = 0n
 
-    const hasPaymaster = isVersion07(userOp) && userOp.paymaster !== null
-    const executionData = successResult.data.executionResult
+    if (
+        !paymasterVerificationGasLimit &&
+        isVersion07(simulationUserOp) &&
+        simulationUserOp.paymaster !== null &&
+        "paymasterVerificationGasLimit" in successResult.data.executionResult
+    ) {
+        paymasterVerificationGasLimit =
+            successResult.data.executionResult.paymasterVerificationGasLimit ||
+            1n
 
-    if (hasPaymaster) {
-        if (
-            !paymasterVerificationGasLimit &&
-            "paymasterVerificationGasLimit" in executionData
-        ) {
-            paymasterVerificationGasLimit =
-                executionData.paymasterVerificationGasLimit || 1n
-        }
+        paymasterVerificationGasLimit = scaleBigIntByPercent(
+            paymasterVerificationGasLimit,
+            paymasterGasLimitMultiplier
+        )
+    }
 
-        if ("paymasterPostOpGasLimit" in executionData) {
-            paymasterPostOpGasLimit =
-                executionData.paymasterPostOpGasLimit || 1n
-        }
+    if (
+        isVersion07(simulationUserOp) &&
+        simulationUserOp.paymaster !== null &&
+        "paymasterPostOpGasLimit" in successResult.data.executionResult
+    ) {
+        paymasterPostOpGasLimit =
+            successResult.data.executionResult.paymasterPostOpGasLimit || 1n
+
+        const userOpPaymasterPostOpGasLimit =
+            "paymasterPostOpGasLimit" in userOp
+                ? (userOp.paymasterPostOpGasLimit ?? 1n)
+                : 1n
+
+        paymasterPostOpGasLimit = maxBigInt(
+            userOpPaymasterPostOpGasLimit,
+            scaleBigIntByPercent(
+                paymasterPostOpGasLimit,
+                paymasterGasLimitMultiplier
+            )
+        )
     }
 
     if (simulationUserOp.callData === "0x") {
@@ -245,18 +246,6 @@ const getGasEstimates = async ({
         )
     }
 
-    // If there are queued userOps, we need to add some buffer and floor as queued userOps
-    // could have warmed up state.
-    if (queuedUserOps.length > 0) {
-        for (let i = 0; i < queuedUserOps.length; i++) {
-            callGasLimit = scaleBigIntByPercent(
-                callGasLimit,
-                v7CallGasLimitMultiplier
-            )
-        }
-        callGasLimit = maxBigInt(callGasLimit, callGasLimitFloor)
-    }
-
     return {
         status: "success",
         estimates: {
@@ -280,19 +269,8 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
         const {
             supportsEip7623,
             v7PreVerificationGasLimitMultiplier,
-            v6PreVerificationGasLimitMultiplier,
-            chainType
+            v6PreVerificationGasLimitMultiplier
         } = rpcHandler.config
-
-        // Validate userOp fields (sync - fail fast before async checks)
-        const [fieldsValid, fieldsError] = rpcHandler.validateUserOpFields({
-            userOp,
-            entryPoint,
-            isEstimation: true
-        })
-        if (!fieldsValid) {
-            throw new RpcError(fieldsError, ERC7769Errors.InvalidFields)
-        }
 
         // Execute multiple async operations in parallel
         const [
@@ -301,8 +279,7 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
             l2GasComponent
         ] = await Promise.all([
             rpcHandler.validateEip7702Auth({
-                userOp,
-                validateSignature: false
+                userOp
             }),
             getGasEstimates({
                 rpcHandler,
@@ -323,7 +300,7 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
         if (!validEip7702Auth) {
             throw new RpcError(
                 validEip7702AuthError,
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -362,7 +339,8 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
             )
         }
 
-        const finalGasLimits = await rpcHandler.validator.validateHandleOp({
+        // Check if userOperation passes without estimation balance overrides (will throw error if it fails validation)
+        await rpcHandler.validator.validateHandleOp({
             userOp: {
                 ...userOp,
                 ...gasEstimateResult.estimates, // use actual callGasLimit, verificationGasLimit, paymasterPostOpGasLimit, paymasterVerificationGasLimit
@@ -379,19 +357,7 @@ export const ethEstimateUserOperationGasHandler = createMethodHandler({
             callGasLimit,
             paymasterVerificationGasLimit,
             paymasterPostOpGasLimit
-        } = finalGasLimits
-
-        if (chainType === "monad") {
-            preVerificationGas = await calcMonadPvg({
-                config: rpcHandler.config,
-                userOp: {
-                    ...userOp,
-                    ...finalGasLimits
-                },
-                entryPoint,
-                validate: false
-            })
-        }
+        } = gasEstimateResult.estimates
 
         if (isVersion07(userOp)) {
             return {

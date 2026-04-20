@@ -19,19 +19,14 @@ import "account-abstraction-v8/utils/Exec.sol";
 import "@openzeppelin-v5.1.0/contracts/utils/ReentrancyGuardTransient.sol";
 import "@openzeppelin-v5.1.0/contracts/utils/introspection/ERC165.sol";
 import "@openzeppelin-v5.1.0/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin-v5.1.0/contracts/utils/StorageSlot.sol";
 
-import "../SimulationOverrideHelper.sol";
-import "./IEntryPointFilterOpsOverride.sol";
-
-/// @custom:notice This EntryPoint closely resembles the actual EntryPoint with some diffs seen at https://www.diffchecker.com/ha2YsRp8/
-contract EntryPointFilterOpsOverride08 is
-    IEntryPoint,
-    StakeManager,
-    NonceManager,
-    ReentrancyGuardTransient,
-    ERC165,
-    IEntryPointFilterOpsOverride08
-{
+/**
+ * Account-Abstraction (EIP-4337) singleton EntryPoint v0.8 implementation.
+ * Only one instance required on each chain.
+ * @custom:security-contact https://bounty.ethereum.org
+ */
+contract EntryPointFilterOpsOverride08 is IEntryPoint, StakeManager, NonceManager, ReentrancyGuardTransient, ERC165 {
     using UserOperationLib for PackedUserOperation;
 
     /**
@@ -72,8 +67,7 @@ contract EntryPointFilterOpsOverride08 is
     }
 
     // Can't rely on "immutable" (constructor-initialized) variables" in simulation
-    // must be called once before simulation.
-    function initDomainSeparator() external {
+    function _initDomainSeparator() internal {
         __domainSeparatorV4 = __buildDomainSeparator();
     }
 
@@ -84,6 +78,7 @@ contract EntryPointFilterOpsOverride08 is
 
     /// @inheritdoc IEntryPoint
     function handleOps(PackedUserOperation[] calldata ops, address payable beneficiary) external nonReentrant {
+        _initDomainSeparator();
         uint256 opslen = ops.length;
         UserOpInfo[] memory opInfos = new UserOpInfo[](opslen);
         unchecked {
@@ -172,7 +167,8 @@ contract EntryPointFilterOpsOverride08 is
 
     /// @inheritdoc IEntryPoint
     function senderCreator() public view virtual returns (ISenderCreator) {
-        address creator = SimulationOverrideHelper.getSenderCreator08();
+        address creator = StorageSlot.getAddressSlot(keccak256("SENDER_CREATOR")).value;
+        if (creator == address(0)) creator = 0x449ED7C3e6Fee6a97311d4b55475DF59C44AdD33;
         return ISenderCreator(creator);
     }
 
@@ -700,8 +696,8 @@ contract EntryPointFilterOpsOverride08 is
             return (address(0), false);
         }
         ValidationData memory data = _parseValidationData(validationData);
-        uint256 blockTimestamp = SimulationOverrideHelper.getBlockTimestamp();
-        outOfTimeRange = blockTimestamp > data.validUntil || blockTimestamp <= data.validAfter;
+        // solhint-disable-next-line not-rely-on-time
+        outOfTimeRange = block.timestamp > data.validUntil || block.timestamp <= data.validAfter;
         aggregator = data.aggregator;
     }
 
@@ -846,7 +842,7 @@ contract EntryPointFilterOpsOverride08 is
         unchecked {
             uint256 maxFeePerGas = mUserOp.maxFeePerGas;
             uint256 maxPriorityFeePerGas = mUserOp.maxPriorityFeePerGas;
-            uint256 blockBaseFeePerGas = SimulationOverrideHelper.getBlockBaseFee();
+            uint256 blockBaseFeePerGas = StorageSlot.getUint256Slot(keccak256("BLOCK_BASE_FEE_PER_GAS")).value;
             return min(maxFeePerGas, maxPriorityFeePerGas + blockBaseFeePerGas);
         }
     }

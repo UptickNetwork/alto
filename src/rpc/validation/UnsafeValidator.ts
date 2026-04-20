@@ -1,23 +1,31 @@
 import type { GasPriceManager } from "@alto/handlers"
+import type {
+    InterfaceValidator,
+    StateOverrides,
+    UserOperationV06,
+    UserOperationV07,
+    ValidationResult,
+    ValidationResultV06,
+    ValidationResultV07,
+    ValidationResultWithAggregationV06,
+    ValidationResultWithAggregationV07
+} from "@alto/types"
 import {
     type Address,
-    ERC7769Errors,
     EntryPointV06Abi,
+    ExecutionErrors,
     type ExecutionResult,
-    type InterfaceValidator,
     type ReferencedCodeHashes,
     RpcError,
-    type StateOverrides,
     type StorageMap,
     type UserOperation,
-    type UserOperation06,
-    type UserOperation07,
-    type ValidationResult,
-    type ValidationResult06,
-    type ValidationResult07,
-    entryPointExecutionErrorSchema06
+    ValidationErrors,
+    type ValidationResultWithAggregation,
+    entryPointExecutionErrorSchemaV06,
+    entryPointExecutionErrorSchemaV07
 } from "@alto/types"
-import { type Logger, type Metrics, isVersion06 } from "@alto/utils"
+import type { Logger, Metrics } from "@alto/utils"
+import { isVersion06 } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
     BaseError,
@@ -33,11 +41,7 @@ import { fromZodError } from "zod-validation-error"
 import type { AltoConfig } from "../../createConfig"
 import { getEip7702DelegationOverrides } from "../../utils/eip7702"
 import { GasEstimationHandler } from "../estimation/gasEstimationHandler"
-import type {
-    SimulateHandleOpFailResult,
-    SimulateHandleOpResult
-} from "../estimation/types"
-import { toErc7769Code } from "../estimation/utils"
+import type { SimulateHandleOpResult } from "../estimation/types"
 
 export class UnsafeValidator implements InterfaceValidator {
     config: AltoConfig
@@ -70,17 +74,24 @@ export class UnsafeValidator implements InterfaceValidator {
         )
     }
 
-    async getSimulationResult06(
+    async getSimulationResult(
+        isVersion06: boolean,
         errorResult: unknown,
         logger: Logger,
         simulationType: "validation" | "execution"
-    ): Promise<ValidationResult | ExecutionResult> {
-        const parsingResult =
-            entryPointExecutionErrorSchema06.safeParse(errorResult)
+    ): Promise<
+        ValidationResult | ValidationResultWithAggregation | ExecutionResult
+    > {
+        const entryPointExecutionErrorSchema = isVersion06
+            ? entryPointExecutionErrorSchemaV06
+            : entryPointExecutionErrorSchemaV07
 
-        if (!parsingResult.success) {
+        const entryPointErrorSchemaParsing =
+            entryPointExecutionErrorSchema.safeParse(errorResult)
+
+        if (!entryPointErrorSchemaParsing.success) {
             try {
-                const err = fromZodError(parsingResult.error)
+                const err = fromZodError(entryPointErrorSchemaParsing.error)
                 logger.error(
                     { error: err.message },
                     "unexpected error during valiation"
@@ -93,20 +104,12 @@ export class UnsafeValidator implements InterfaceValidator {
                     const revertError = errorResult.walk(
                         (err) => err instanceof ContractFunctionExecutionError
                     )
-                    // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
-                    const reason = (revertError?.cause as any)?.reason
-                    if (reason === undefined) {
-                        logger.error(
-                            { err: errorResult },
-                            "UserOperation reverted during simulation with no reason"
-                        )
-                        throw new Error(
-                            "UserOperation reverted during simulation with no reason"
-                        )
-                    }
                     throw new RpcError(
-                        `UserOperation reverted during simulation with reason: ${reason}`,
-                        ERC7769Errors.SimulateValidation
+                        `UserOperation reverted during simulation with reason: ${
+                            // biome-ignore lint/suspicious/noExplicitAny: it's a generic type
+                            (revertError?.cause as any)?.reason
+                        }`,
+                        ValidationErrors.SimulateValidation
                     )
                 }
                 sentry.captureException(errorResult)
@@ -118,13 +121,13 @@ export class UnsafeValidator implements InterfaceValidator {
             }
         }
 
-        const errorData = parsingResult.data
+        const errorData = entryPointErrorSchemaParsing.data
 
         if (errorData.errorName === "FailedOp") {
             const reason = errorData.args.reason
             throw new RpcError(
                 `UserOperation reverted during simulation with reason: ${reason}`,
-                toErc7769Code(reason)
+                ValidationErrors.SimulateValidation
             )
         }
 
@@ -144,6 +147,7 @@ export class UnsafeValidator implements InterfaceValidator {
         }
 
         const simulationResult = errorData.args
+
         return simulationResult
     }
 
@@ -152,7 +156,7 @@ export class UnsafeValidator implements InterfaceValidator {
         entryPoint: Address
         queuedUserOps: UserOperation[]
         stateOverrides?: StateOverrides
-    }) {
+    }): Promise<SimulateHandleOpResult> {
         const { userOp, entryPoint, queuedUserOps, stateOverrides } = args
         const error = await this.gasEstimationHandler.validateHandleOp({
             userOp,
@@ -163,73 +167,20 @@ export class UnsafeValidator implements InterfaceValidator {
             stateOverrides
         })
 
-        let { callGasLimit, verificationGasLimit } = userOp
-        let paymasterVerificationGasLimit =
-            "paymasterVerificationGasLimit" in userOp
-                ? userOp.paymasterVerificationGasLimit
-                : null
-        // Check if userOperation passes without estimation balance overrides (will throw error if it fails validation)
-        // the errors we are looking for are:
-        // 1. AA31 paymaster deposit too low
-        // 2. AA21 didn't pay prefund
         if (error.result === "failed") {
-            const data = error.data.toString()
+            let errorCode: number = ExecutionErrors.UserOperationReverted
 
-            if (
-                data.includes("AA31") ||
-                data.includes("AA21") ||
-                data.includes("AA50")
-            ) {
-                const errorMessage = data
-                throw new RpcError(
-                    `UserOperation reverted during simulation with reason: ${errorMessage}`,
-                    toErc7769Code(errorMessage)
-                )
+            if (error.data.toString().includes("AA23")) {
+                errorCode = ValidationErrors.SimulateValidation
             }
 
-            this.metrics.altoSecondValidationFailed.inc()
-
-            this.logger.warn(
-                { data },
-                "Second validation during eth_estimateUserOperationGas led to a failure"
+            throw new RpcError(
+                `UserOperation reverted during simulation with reason: ${error.data}`,
+                errorCode
             )
-
-            // we always have to double the call gas limits as other gas limits happen
-            // before we even get to callGasLimit
-            callGasLimit *= 2n
-            const isPaymasterError =
-                data.includes("AA33") || data.includes("AA36")
-
-            const isVerificationError =
-                data.includes("AA23") ||
-                data.includes("AA13") ||
-                data.includes("AA26") ||
-                data.includes("AA40") ||
-                data.includes("AA41")
-
-            if (isPaymasterError && paymasterVerificationGasLimit) {
-                // paymasterVerificationGasLimit out of gas errors
-                paymasterVerificationGasLimit *= 2n
-            } else if (isVerificationError) {
-                // verificationGasLimit out of gas errors
-                verificationGasLimit *= 2n
-                // we need to increase paymaster fields because they will be
-                // caught after verification gas limit errors
-                if (paymasterVerificationGasLimit) {
-                    paymasterVerificationGasLimit *= 2n
-                }
-            }
         }
 
-        return {
-            callGasLimit: callGasLimit,
-            verificationGasLimit: verificationGasLimit,
-            paymasterVerificationGasLimit: paymasterVerificationGasLimit,
-            paymasterPostOpGasLimit:
-                "paymasterPostOpGasLimit" in userOp
-                    ? userOp.paymasterPostOpGasLimit
-                    : null
-        }
+        return error
     }
 
     async getExecutionResult(args: {
@@ -249,22 +200,34 @@ export class UnsafeValidator implements InterfaceValidator {
         })
 
         if (error.result === "failed") {
+            let errorCode: number = ExecutionErrors.UserOperationReverted
+
+            if (error.data.toString().includes("AA23")) {
+                errorCode = ValidationErrors.SimulateValidation
+
+                return {
+                    result: "failed",
+                    data: error.data,
+                    code: errorCode
+                }
+            }
+
             return {
                 result: "failed",
                 data: `UserOperation reverted during simulation with reason: ${error.data}`,
-                code: error.code
+                code: errorCode
             }
         }
 
         return error
     }
 
-    async getValidationResult06(args: {
-        userOp: UserOperation06
+    async getValidationResultV06(args: {
+        userOp: UserOperationV06
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult06 & {
+        (ValidationResultV06 | ValidationResultWithAggregationV06) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -309,18 +272,19 @@ export class UnsafeValidator implements InterfaceValidator {
         )
 
         const validationResult = {
-            ...((await this.getSimulationResult06(
+            ...((await this.getSimulationResult(
+                isVersion06(userOp),
                 simulateValidationResult,
                 this.logger,
                 "validation"
-            )) as ValidationResult06),
+            )) as ValidationResultV06 | ValidationResultWithAggregationV06),
             storageMap: {}
         }
 
         if (validationResult.returnInfo.sigFailed) {
             throw new RpcError(
                 "Invalid UserOperation signature or paymaster signature",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
@@ -338,7 +302,7 @@ export class UnsafeValidator implements InterfaceValidator {
         ) {
             throw new RpcError(
                 "User operation is not valid yet",
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 
@@ -346,14 +310,17 @@ export class UnsafeValidator implements InterfaceValidator {
             this.config.expirationCheck &&
             validationResult.returnInfo.validUntil < now + 5
         ) {
-            throw new RpcError("expires too soon", ERC7769Errors.ExpiresShortly)
+            throw new RpcError(
+                "expires too soon",
+                ValidationErrors.ExpiresShortly
+            )
         }
 
         // validate runtime
         if (runtimeValidation.result === "failed") {
             throw new RpcError(
                 `UserOperation reverted during simulation with reason: ${runtimeValidation.data}`,
-                ERC7769Errors.SimulateValidation
+                ValidationErrors.SimulateValidation
             )
         }
 
@@ -430,13 +397,13 @@ export class UnsafeValidator implements InterfaceValidator {
         )
     }
 
-    async getValidationResult07(args: {
-        userOp: UserOperation07
-        queuedUserOps: UserOperation07[]
+    async getValidationResultV07(args: {
+        userOp: UserOperationV07
+        queuedUserOps: UserOperationV07[]
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult07 & {
+        (ValidationResultV07 | ValidationResultWithAggregationV07) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
@@ -451,16 +418,16 @@ export class UnsafeValidator implements InterfaceValidator {
             })
 
         if (simulateValidationResult.result === "failed") {
-            const failedResult =
-                simulateValidationResult as SimulateHandleOpFailResult
             throw new RpcError(
-                `UserOperation reverted with reason: ${failedResult.data}`,
-                failedResult.code
+                `UserOperation reverted with reason: ${
+                    simulateValidationResult.data as string
+                }`,
+                ValidationErrors.SimulateValidation
             )
         }
 
         const validationResult =
-            simulateValidationResult.data as ValidationResult07
+            simulateValidationResult.data as ValidationResultWithAggregationV07
 
         const mergedValidation = this.mergeValidationDataValues(
             validationResult.returnInfo.accountValidationData,
@@ -502,14 +469,14 @@ export class UnsafeValidator implements InterfaceValidator {
         if (res.returnInfo.accountSigFailed) {
             throw new RpcError(
                 "Invalid UserOp signature",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
         if (res.returnInfo.paymasterSigFailed) {
             throw new RpcError(
                 "Invalid UserOp paymasterData",
-                ERC7769Errors.InvalidSignature
+                ValidationErrors.InvalidSignature
             )
         }
 
@@ -518,7 +485,7 @@ export class UnsafeValidator implements InterfaceValidator {
         if (res.returnInfo.validAfter > now) {
             throw new RpcError(
                 `User operation is not valid yet, validAfter=${res.returnInfo.validAfter}, now=${now}`,
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 
@@ -529,7 +496,7 @@ export class UnsafeValidator implements InterfaceValidator {
         ) {
             throw new RpcError(
                 `UserOperation expires too soon, validUntil=${res.returnInfo.validUntil}, now=${now}`,
-                ERC7769Errors.ExpiresShortly
+                ValidationErrors.ExpiresShortly
             )
         }
 
@@ -542,22 +509,22 @@ export class UnsafeValidator implements InterfaceValidator {
         entryPoint: Address
         codeHashes?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult & {
+        (ValidationResult | ValidationResultWithAggregation) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }
     > {
         const { userOp, queuedUserOps, entryPoint, codeHashes } = args
         if (isVersion06(userOp)) {
-            return this.getValidationResult06({
+            return this.getValidationResultV06({
                 userOp,
                 entryPoint,
                 codeHashes
             })
         }
-        return this.getValidationResult07({
+        return this.getValidationResultV07({
             userOp,
-            queuedUserOps: queuedUserOps as UserOperation07[],
+            queuedUserOps: queuedUserOps as UserOperationV07[],
             entryPoint
         })
     }
@@ -568,7 +535,7 @@ export class UnsafeValidator implements InterfaceValidator {
         entryPoint: Address
         _referencedContracts?: ReferencedCodeHashes
     }): Promise<
-        ValidationResult & {
+        (ValidationResult | ValidationResultWithAggregation) & {
             storageMap: StorageMap
             referencedContracts?: ReferencedCodeHashes
         }

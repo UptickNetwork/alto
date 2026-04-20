@@ -1,6 +1,7 @@
-import type { StateOverrides, UserOperation06 } from "@alto/types"
+import type { StateOverrides, UserOperationV06 } from "@alto/types"
 import type { Logger } from "@alto/utils"
-import { type Address, type Hex, getContract } from "viem"
+import type { Hex } from "viem"
+import { type Address, getContract } from "viem"
 import { entryPoint06Abi } from "viem/account-abstraction"
 import type { AltoConfig } from "../../createConfig"
 import type { SimulateHandleOpResult } from "./types"
@@ -11,8 +12,8 @@ import {
 } from "./utils"
 
 export class GasEstimator06 {
-    private readonly config: AltoConfig
-    private readonly logger: Logger
+    private config: AltoConfig
+    private logger: Logger
 
     constructor(config: AltoConfig) {
         this.config = config
@@ -34,12 +35,12 @@ export class GasEstimator06 {
         useCodeOverride = true,
         userStateOverrides = undefined
     }: {
-        userOp: UserOperation06
+        userOp: UserOperationV06
         targetAddress: Address
         targetCallData: Hex
         entryPoint: Address
         useCodeOverride?: boolean
-        userStateOverrides?: StateOverrides
+        userStateOverrides?: StateOverrides | undefined
     }): Promise<SimulateHandleOpResult> {
         const {
             publicClient,
@@ -74,7 +75,14 @@ export class GasEstimator06 {
             // simulateHandleOp should always revert, if it doesn't something is wrong
             throw new Error("simulateHandleOp did not revert")
         } catch (e) {
-            return decodeSimulateHandleOpError(e, this.logger)
+            const decodedError = decodeSimulateHandleOpError(e, this.logger)
+            if (decodedError.result === "failed") {
+                this.logger.warn(
+                    { err: e, data: decodedError.data },
+                    "Contract function reverted in simulateValidation"
+                )
+            }
+            return decodedError
         }
     }
 }

@@ -2,41 +2,33 @@ import type { GasPriceManager } from "@alto/handlers"
 import type { Mempool } from "@alto/mempool"
 import type {
     BundlingMode,
-    GasPriceParameters,
     SubmittedBundleInfo,
     UserOperationBundle
 } from "@alto/types"
+import type { GasPriceParameters } from "@alto/types"
 import { type Logger, type Metrics, scaleBigIntByPercent } from "@alto/utils"
-import * as sentry from "@sentry/node"
-import Redis from "ioredis"
-import type { Hex, WatchBlocksReturnType } from "viem"
+import type { Block, Hex, WatchBlocksReturnType } from "viem"
 import type { AltoConfig } from "../createConfig"
-import type { BundleManager } from "./bundleManager"
 import type { Executor } from "./executor"
 import type { SenderManager } from "./senderManager"
+import type { UserOpMonitor } from "./userOpMonitor"
 import { getUserOpHashes } from "./utils"
 
 const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
 
 export class ExecutorManager {
-    private readonly senderManager: SenderManager
-    private readonly config: AltoConfig
-    private readonly executor: Executor
-    private readonly mempool: Mempool
-    private readonly logger: Logger
-    private readonly metrics: Metrics
-    private readonly gasPriceManager: GasPriceManager
-    private readonly bundleManager: BundleManager
+    private senderManager: SenderManager
+    private config: AltoConfig
+    private executor: Executor
+    private mempool: Mempool
+    private logger: Logger
+    private metrics: Metrics
+    private gasPriceManager: GasPriceManager
     private opsCount: number[] = []
     private bundlingMode: BundlingMode
+    private userOpMonitor: UserOpMonitor
     private unWatch: WatchBlocksReturnType | undefined
-    private redisBlockCache: {
-        redis: Redis
-        blockNumberKey: string
-        refreshGuardKey: string
-        localBlockNumber: bigint
-    } | null
 
     private currentlyHandlingBlock = false
 
@@ -47,7 +39,7 @@ export class ExecutorManager {
         metrics,
         gasPriceManager,
         senderManager,
-        bundleManager
+        userOpMonitor
     }: {
         config: AltoConfig
         executor: Executor
@@ -55,7 +47,7 @@ export class ExecutorManager {
         metrics: Metrics
         gasPriceManager: GasPriceManager
         senderManager: SenderManager
-        bundleManager: BundleManager
+        userOpMonitor: UserOpMonitor
     }) {
         this.config = config
         this.executor = executor
@@ -70,21 +62,8 @@ export class ExecutorManager {
         this.gasPriceManager = gasPriceManager
         this.senderManager = senderManager
         this.bundlingMode = this.config.bundleMode
-        this.bundleManager = bundleManager
+        this.userOpMonitor = userOpMonitor
 
-        if (config.enableHorizontalScaling && config.redisEndpoint) {
-            this.redisBlockCache = {
-                redis: new Redis(config.redisEndpoint),
-                blockNumberKey: `${config.redisKeyPrefix}:${config.chainId}:watch-blocks:value`,
-                refreshGuardKey: `${config.redisKeyPrefix}:${config.chainId}:watch-blocks:lock`,
-                localBlockNumber: 0n
-            }
-        } else {
-            this.redisBlockCache = null
-        }
-    }
-
-    start(): void {
         if (this.bundlingMode === "auto") {
             this.autoScalingBundling()
         }
@@ -110,9 +89,7 @@ export class ExecutorManager {
             (timestamp) => now - timestamp < RPM_WINDOW
         )
 
-        const bundles = await this.mempool.getBundles(
-            this.config.maxBundleCount
-        )
+        const bundles = await this.mempool.getBundles()
 
         if (bundles.length > 0) {
             // Count total ops and add timestamps
@@ -141,120 +118,21 @@ export class ExecutorManager {
         }
     }
 
-    private async pollBlockWithRedis(): Promise<void> {
-        // Should never happen.
-        if (!this.redisBlockCache) {
-            throw new Error("Redis block cache not configured")
-        }
-
-        // Ensure ttl is an integer.
-        const halfBlockTime = Math.floor(this.config.blockTime / 2)
-
-        try {
-            let blockNumber: bigint | null = null
-
-            // Try to acquire lock.
-            const shouldFetchBlock = await this.redisBlockCache.redis
-                .set(
-                    this.redisBlockCache.refreshGuardKey,
-                    "1",
-                    "PX",
-                    halfBlockTime,
-                    "NX"
-                )
-                .catch((err: unknown) => {
-                    this.logger.warn(
-                        { err },
-                        "Redis lock check failed, falling back to RPC"
-                    )
-                    sentry.captureException(err)
-                    return "OK"
-                })
-
-            if (shouldFetchBlock === "OK") {
-                // Lock acquired, make getBlockNumber RPC call and write to cache.
-                blockNumber = await this.config.publicClient.getBlockNumber()
-
-                try {
-                    await this.redisBlockCache.redis.set(
-                        this.redisBlockCache.blockNumberKey,
-                        blockNumber.toString(),
-                        "PX",
-                        halfBlockTime
-                    )
-                } catch (err) {
-                    this.logger.warn({ err }, "Redis block cache write failed")
-                    sentry.captureException(err)
-                }
-            } else {
-                // Another instance is already fetching or recently fetched, read from cached block number.
-                try {
-                    const cached = await this.redisBlockCache.redis.get(
-                        this.redisBlockCache.blockNumberKey
-                    )
-                    blockNumber = cached ? BigInt(cached) : null
-                } catch (err) {
-                    this.logger.warn({ err }, "Redis block cache read failed")
-                    sentry.captureException(err)
-                }
-
-                // Cache empty, check again next poll.
-                if (!blockNumber) {
-                    return
-                }
-            }
-
-            // If block number changed, run handleBlock().
-            if (blockNumber !== this.redisBlockCache.localBlockNumber) {
-                this.redisBlockCache.localBlockNumber = blockNumber
-                await this.handleBlock()
-            }
-        } catch (err) {
-            this.logger.warn({ err }, "error polling block with Redis cache")
-        }
-    }
-
     startWatchingBlocks(): void {
         if (this.unWatch) {
             return
         }
 
-        // If preconfirmationTime is set, poll at intervals instead of watching blocks
-        if (this.config.flashblocksPreconfirmationTime) {
-            // Set up interval to call handleBlock
-            const intervalId = setInterval(async () => {
-                try {
-                    await this.handleBlock()
-                } catch (err) {
-                    this.logger.error({ err }, "error while polling blocks")
-                }
-            }, this.config.flashblocksPreconfirmationTime)
-
-            // Store cleanup function
-            this.unWatch = () => {
-                clearInterval(intervalId)
-            }
-        } else if (this.redisBlockCache) {
-            const pollingInterval = this.config.blockTime / 2
-            const intervalId = setInterval(async () => {
-                await this.pollBlockWithRedis()
-            }, pollingInterval)
-            this.unWatch = () => {
-                clearInterval(intervalId)
-            }
-        } else {
-            // Default behavior - watch blocks
-            this.unWatch = this.config.publicClient.watchBlocks({
-                onBlock: async () => {
-                    await this.handleBlock()
-                },
-                onError: (err) => {
-                    this.logger.error({ err }, "error while watching blocks")
-                },
-                includeTransactions: false,
-                emitMissed: false
-            })
-        }
+        this.unWatch = this.config.publicClient.watchBlocks({
+            onBlock: async (block) => {
+                await this.handleBlock(block)
+            },
+            onError: (error) => {
+                this.logger.error({ error }, "error while watching blocks")
+            },
+            includeTransactions: false,
+            emitMissed: false
+        })
 
         this.logger.debug("started watching blocks")
     }
@@ -277,7 +155,7 @@ export class ExecutorManager {
         const wallet = await this.senderManager.getWallet()
 
         const [gasPriceParams, baseFee, nonce] = await Promise.all([
-            this.gasPriceManager.tryGetNetworkGasPrice({ forExecutor: true }),
+            this.gasPriceManager.tryGetNetworkGasPrice(),
             this.getBaseFee(),
             this.config.publicClient.getTransactionCount({
                 address: wallet.address,
@@ -308,71 +186,23 @@ export class ExecutorManager {
 
         if (!bundleResult.success) {
             const { rejectedUserOps, recoverableOps, reason } = bundleResult
-
-            // Recover any userOps that can be resubmitted.
-            await this.mempool.resubmitUserOps({
-                userOps: recoverableOps,
-                entryPoint,
-                reason
-            })
-
-            // For rejected userOps, we need to check for frontruns
-            const shouldCheckFrontrun = rejectedUserOps.some(
-                ({ reason }) =>
-                    reason.includes("AA25 invalid account nonce") ||
-                    reason.includes("AA10 sender already constructed")
-            )
-
-            if (shouldCheckFrontrun) {
-                // Check each rejected userOp for frontrun or included
-                const results = await Promise.all(
-                    rejectedUserOps.map(async (userOpInfo) => ({
-                        userOpInfo,
-                        status: await this.bundleManager.getUserOpStatus({
-                            userOpInfo,
-                            entryPoint,
-                            bundlerTxs: [],
-                            blockReceivedTimestamp: Date.now()
-                        })
-                    }))
-                )
-
-                // Drop userOps that were rejected but not frontrun or included
-                const notFoundUserOps = results
-                    .filter(({ status }) => status === "not_found")
-                    .map(({ userOpInfo }) => userOpInfo)
-
-                await this.mempool.dropUserOps(entryPoint, notFoundUserOps)
-
-                // Stop tracking userOps that were included onchain either due to frontrun or included
-                const confirmedUserOps = results
-                    .filter(({ status }) =>
-                        ["frontran", "included"].includes(status)
-                    )
-                    .map(({ userOpInfo }) => userOpInfo)
-
-                await this.mempool.removeProcessing({
-                    entryPoint,
-                    userOps: confirmedUserOps
-                })
-            } else {
-                this.logger.warn(
-                    {
-                        reason,
-                        userOps: getUserOpHashes(rejectedUserOps)
-                    },
-                    "failed to send bundle transaction"
-                )
-
-                await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
-            }
-
             // Free wallet as no bundle was sent.
             await this.senderManager.markWalletProcessed(wallet)
 
+            // Drop rejected ops
+            await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
             this.metrics.userOpsSubmitted
                 .labels({ status: "failed" })
                 .inc(rejectedUserOps.length)
+
+            // Handle recoverable ops
+            if (recoverableOps.length > 0) {
+                await this.mempool.resubmitUserOps({
+                    userOps: recoverableOps,
+                    entryPoint,
+                    reason
+                })
+            }
 
             if (reason === "filterops_failed" || reason === "generic_error") {
                 this.metrics.bundlesSubmitted.labels({ status: "failed" }).inc()
@@ -410,15 +240,15 @@ export class ExecutorManager {
             lastReplaced: Date.now()
         }
 
-        // Track bundle and start loop to watch blocks
-        this.bundleManager.trackBundle(submittedBundle)
-        this.startWatchingBlocks()
-
+        this.userOpMonitor.trackBundle(submittedBundle)
         await this.mempool.markUserOpsAsSubmitted({
             userOps: submittedBundle.bundle.userOps,
+            entryPoint: submittedBundle.bundle.entryPoint,
             transactionHash: submittedBundle.transactionHash
         })
 
+        // Start watching blocks after marking operations as submitted
+        this.startWatchingBlocks()
         await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
         this.metrics.bundlesSubmitted.labels({ status: "success" }).inc()
 
@@ -432,15 +262,13 @@ export class ExecutorManager {
         }
     }
 
-    private async handleBlock() {
+    private async handleBlock(block: Block) {
         if (this.currentlyHandlingBlock) {
             return
         }
-
         this.currentlyHandlingBlock = true
-        const blockReceivedTimestamp = Date.now()
 
-        const pendingBundles = this.bundleManager.getPendingBundles()
+        const pendingBundles = this.userOpMonitor.getPendingBundles()
 
         if (pendingBundles.length === 0) {
             this.stopWatchingBlocks()
@@ -448,51 +276,38 @@ export class ExecutorManager {
             return
         }
 
-        const [bundleStatuses, networkGasPrice, networkBaseFee] =
-            await Promise.all([
-                this.bundleManager.getBundleStatuses(pendingBundles),
-                this.gasPriceManager
-                    .tryGetNetworkGasPrice({ forExecutor: true })
-                    .catch(() => ({
-                        maxFeePerGas: 0n,
-                        maxPriorityFeePerGas: 0n
-                    })),
-                this.getBaseFee().catch(() => 0n)
-            ])
+        const [receipts, networkGasPrice, networkBaseFee] = await Promise.all([
+            this.userOpMonitor.getReceipts(pendingBundles),
+            this.gasPriceManager.tryGetNetworkGasPrice().catch(() => ({
+                maxFeePerGas: 0n,
+                maxPriorityFeePerGas: 0n
+            })),
+            this.getBaseFee().catch(() => 0n)
+        ])
 
         await Promise.all(
-            bundleStatuses.map(async (bundleStatus, index) => {
-                if (bundleStatus.status === "included") {
-                    await this.bundleManager.processIncludedBundle({
+            receipts.map(async (receipt, index) => {
+                if (receipt.status === "included") {
+                    await this.userOpMonitor.processIncludedBundle({
                         submittedBundle: pendingBundles[index],
-                        bundleReceipt: bundleStatus,
-                        blockReceivedTimestamp
+                        bundleReceipt: receipt
                     })
                 }
 
-                if (bundleStatus.status === "reverted") {
-                    await this.bundleManager.processRevertedBundle({
-                        blockReceivedTimestamp,
+                if (receipt.status === "reverted") {
+                    await this.userOpMonitor.processRevertedBundle({
                         submittedBundle: pendingBundles[index],
-                        bundleReceipt: bundleStatus
+                        bundleReceipt: receipt,
+                        block
                     })
                 }
 
                 // can be potentially resubmitted - so we first submit it again to optimize for the speed
-                if (bundleStatus.status === "not_found") {
+                if (receipt.status === "not_found") {
                     this.potentiallyResubmitBundle({
-                        blockReceivedTimestamp,
                         submittedBundle: pendingBundles[index],
                         networkGasPrice,
                         networkBaseFee
-                    })
-                }
-
-                // Internal error - clean up the bundle so it doesn't get stuck
-                if (bundleStatus.status === "internal_error") {
-                    await this.bundleManager.processInternalErrorBundle({
-                        submittedBundle: pendingBundles[index],
-                        error: bundleStatus.error
                     })
                 }
             })
@@ -502,12 +317,10 @@ export class ExecutorManager {
     }
 
     potentiallyResubmitBundle({
-        blockReceivedTimestamp,
         submittedBundle,
         networkGasPrice,
         networkBaseFee
     }: {
-        blockReceivedTimestamp: number
         submittedBundle: SubmittedBundleInfo
         networkGasPrice: {
             maxFeePerGas: bigint
@@ -518,38 +331,24 @@ export class ExecutorManager {
         const { transactionRequest, lastReplaced } = submittedBundle
         const { maxFeePerGas, maxPriorityFeePerGas } = transactionRequest
 
-        const replacementPercent =
-            100n + this.config.gasPriceReplacementThreshold
-
-        const maxFeeThreshold = scaleBigIntByPercent(
-            maxFeePerGas,
-            replacementPercent
-        )
-        const maxPriorityFeeThreshold = scaleBigIntByPercent(
-            maxPriorityFeePerGas,
-            replacementPercent
-        )
-
         const isGasPriceTooLow =
-            networkGasPrice.maxFeePerGas > maxFeeThreshold ||
-            networkGasPrice.maxPriorityFeePerGas > maxPriorityFeeThreshold
+            maxFeePerGas < networkGasPrice.maxFeePerGas ||
+            maxPriorityFeePerGas < networkGasPrice.maxPriorityFeePerGas
 
         const isStuck =
             Date.now() - lastReplaced > this.config.resubmitStuckTimeout
 
         if (isGasPriceTooLow) {
-            this.bundleManager.stopTrackingBundle(submittedBundle)
+            this.userOpMonitor.stopTrackingBundle(submittedBundle)
             this.replaceTransaction({
-                blockReceivedTimestamp,
                 submittedBundle,
                 networkGasPrice,
                 networkBaseFee,
                 reason: "gas_price"
             })
         } else if (isStuck) {
-            this.bundleManager.stopTrackingBundle(submittedBundle)
+            this.userOpMonitor.stopTrackingBundle(submittedBundle)
             this.replaceTransaction({
-                blockReceivedTimestamp,
                 submittedBundle,
                 networkGasPrice,
                 networkBaseFee,
@@ -566,8 +365,7 @@ export class ExecutorManager {
             transactionHash
         } = submittedBundle
 
-        const { walletClients, publicClient, blockTime } = this.config
-        const walletClient = walletClients.public
+        const { walletClient, publicClient, blockTime } = this.config
         const logger = this.logger.child({
             userOps: getUserOpHashes(userOps)
         })
@@ -619,7 +417,7 @@ export class ExecutorManager {
                     setTimeout(resolve, blockTime / 2)
                 )
             } catch (err) {
-                logger.warn({ err }, "failed to cancel bundle")
+                logger.warn({ error: err }, "failed to cancel bundle")
                 gasMultiplier += 20n // Increase gas by additional 20% each retry
             }
         }
@@ -632,13 +430,11 @@ export class ExecutorManager {
     }
 
     async replaceTransaction({
-        blockReceivedTimestamp,
         submittedBundle,
         networkGasPrice,
         networkBaseFee,
         reason
     }: {
-        blockReceivedTimestamp: number
         submittedBundle: SubmittedBundleInfo
         networkGasPrice: GasPriceParameters
         networkBaseFee: bigint
@@ -680,24 +476,17 @@ export class ExecutorManager {
             )
 
             if (shouldCheckFrontrun) {
-                // Check each rejected userOp for frontrun or included
-                const results = await Promise.all(
+                // Check each rejected userOp for frontrun
+                const frontrunResults = await Promise.all(
                     rejectedUserOps.map(async (userOpInfo) => ({
                         userOpInfo,
-                        status: await this.bundleManager.getUserOpStatus({
-                            userOpInfo,
-                            entryPoint,
-                            bundlerTxs: [
-                                submittedBundle.transactionHash,
-                                ...submittedBundle.previousTransactionHashes
-                            ],
-                            blockReceivedTimestamp
-                        })
+                        wasFrontrun:
+                            await this.userOpMonitor.checkFrontrun(userOpInfo)
                     }))
                 )
 
-                const hasFrontrun = results.some(
-                    ({ status }) => status === "frontran"
+                const hasFrontrun = frontrunResults.some(
+                    ({ wasFrontrun }) => wasFrontrun
                 )
 
                 // If one userOp in the bundle was frontrun, we need to cancel the entire bundle
@@ -706,31 +495,15 @@ export class ExecutorManager {
                     await this.cancelBundle(submittedBundle)
                 }
 
-                // Drop userOps that were rejected but not frontrun or included
-                const notFoundUserOps = results
-                    .filter(({ status }) => status === "not_found")
+                // Drop userOps that were rejected but not frontrun
+                const nonFrontrunUserOps = frontrunResults
+                    .filter(({ wasFrontrun }) => !wasFrontrun)
                     .map(({ userOpInfo }) => userOpInfo)
 
-                await this.mempool.dropUserOps(entryPoint, notFoundUserOps)
-
-                // Stop tracking userOps that were included onchain either due to frontrun or included
-                const confirmedUserOps = results
-                    .filter(({ status }) =>
-                        ["frontran", "included"].includes(status)
-                    )
-                    .map(({ userOpInfo }) => userOpInfo)
-
-                await this.mempool.removeProcessing({
-                    entryPoint,
-                    userOps: confirmedUserOps
-                })
+                await this.mempool.dropUserOps(entryPoint, nonFrontrunUserOps)
             } else {
                 this.logger.warn(
-                    {
-                        oldTxHash,
-                        reason,
-                        userOps: getUserOpHashes(rejectedUserOps)
-                    },
+                    { oldTxHash, reason },
                     "failed to replace transaction"
                 )
 
@@ -777,9 +550,7 @@ export class ExecutorManager {
             }
         }
 
-        // Track bundle and start loop to watch blocks
-        this.bundleManager.trackBundle(newTxInfo)
-        this.startWatchingBlocks()
+        this.userOpMonitor.trackBundle(newTxInfo)
 
         // Drop all userOperations that were rejected during simulation.
         await this.mempool.dropUserOps(entryPoint, rejectedUserOps)
@@ -788,13 +559,11 @@ export class ExecutorManager {
             {
                 oldTxHash,
                 newTxHash,
-                reason,
-                userOps: getUserOpHashes(userOpsReplaced)
+                reason
             },
             "replaced transaction"
         )
-        this.metrics.replacedTransactions
-            .labels({ reason, status: "success" })
-            .inc()
+
+        return
     }
 }

@@ -7,7 +7,7 @@ export const ethGetUserOperationReceiptHandler = createMethodHandler({
     handler: async ({ rpcHandler, params }) => {
         const [userOpHash] = params
         try {
-            return await rpcHandler.bundleManager.getUserOpReceipt(userOpHash)
+            return await rpcHandler.userOpMonitor.getUserOpReceipt(userOpHash)
         } catch (err) {
             rpcHandler.logger.error(
                 { err, userOpHash },

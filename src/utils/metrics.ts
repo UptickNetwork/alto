@@ -157,13 +157,6 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const userOpsDropped = new Counter({
-        name: "alto_user_operations_dropped_total",
-        help: "Number of user operations dropped from mempool",
-        labelNames: ["reason"] as const,
-        registers
-    })
-
     const userOpsSubmissionAttempts = new Histogram({
         name: "alto_user_operations_attempts_before_inclusion",
         help: "Number of submission attempts needed before a user operation was included on-chain",
@@ -185,15 +178,6 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    // How much the utility wallet is missing to fully cover executor refills
-    // Expressed in ETH for readability, consistent with other balance gauges
-    const utilityWalletMissingBalance = new Gauge({
-        name: "alto_utility_wallet_missing_balance",
-        help: "ETH missing to fully refill executor wallets (0 if sufficient)",
-        labelNames: [] as const,
-        registers
-    })
-
     const executorWalletsBalances = new Gauge({
         name: "alto_executor_wallet_balance",
         help: "Balance of the executor wallet",
@@ -208,23 +192,16 @@ export function createMetrics(registry: Registry, register = true) {
         registers
     })
 
-    const executorWalletsRequiredBalance = new Gauge({
-        name: "alto_executor_wallets_required_balance",
-        help: "Total minimum balance required across all executor wallets",
-        labelNames: [] as const,
+    const emittedOpEvents = new Counter({
+        name: "alto_emitted_user_operation_events",
+        help: "Total number of emitted UserOperation status events",
+        labelNames: ["event_type", "status"] as const,
         registers
     })
 
     const walletsProcessingTime = new Histogram({
         name: "alto_executor_wallets_processing_duration_seconds",
         help: "Time spent processing user operations by executor wallets",
-        labelNames: [] as const,
-        registers
-    })
-
-    const altoSecondValidationFailed = new Counter({
-        name: "alto_second_validation_failed",
-        help: "Number of times alto's second estimation failed during eth_estimateUserOperationGas and we returned 2x gas limits",
         labelNames: [] as const,
         registers
     })
@@ -247,15 +224,12 @@ export function createMetrics(registry: Registry, register = true) {
         verificationGasLimitEstimationCount,
         replacedTransactions,
         userOpsResubmitted,
-        userOpsDropped,
         utilityWalletBalance,
         utilityWalletInsufficientBalance,
-        utilityWalletMissingBalance,
         executorWalletsBalances,
         executorWalletsMinBalance,
-        executorWalletsRequiredBalance,
+        emittedOpEvents,
         walletsProcessingTime,
-        userOpsSubmissionAttempts,
-        altoSecondValidationFailed
+        userOpsSubmissionAttempts
     }
 }

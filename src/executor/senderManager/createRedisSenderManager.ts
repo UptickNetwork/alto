@@ -1,69 +1,34 @@
-import type { Logger, Metrics } from "@alto/utils"
+import type { Metrics } from "@alto/utils"
 import Redis from "ioredis"
 import type { Account } from "viem"
 import { getAvailableWallets } from "."
 import type { AltoConfig } from "../../createConfig"
 import type { SenderManager } from "../senderManager"
 
-// Lua script for atomic wallet registration.
-// Only adds wallets to the available pool if they haven't been registered before.
-//
-// params:
-// KEYS[1] = available set redis key
-// KEYS[2] = registered set redis key
-// ARGV = wallet addresses
-const ADD_WALLETS_SCRIPT = `
-local availableKey = KEYS[1]
-local registeredKey = KEYS[2]
-local addedWallets = {}
-
-for i, wallet in ipairs(ARGV) do
-    local isNew = redis.call('SADD', registeredKey, wallet)
-    if isNew == 1 then
-        redis.call('SADD', availableKey, wallet)
-        table.insert(addedWallets, wallet)
-    end
-end
-
-return addedWallets
-`
-
-// Uses two Redis Sets:
-// - "available" set: wallets currently available for use (SPOP to acquire, SADD to release)
-// - "registered" set: all wallets ever registered (prevents re-adding in-use wallets)
-async function createRedisWalletPool({
+async function createRedisQueue({
     redis,
-    config,
-    logger,
+    name,
     entries
 }: {
     redis: Redis
-    config: AltoConfig
-    logger: Logger
+    name: string
     entries: string[]
 }) {
-    const keyPrefix = `${config.redisKeyPrefix}:${config.chainId}:wallet-pool`
-    const availableKey = `${keyPrefix}:available`
-    const registeredKey = `${keyPrefix}:registered`
+    const hasElements = await redis.llen(name)
 
-    // Register all wallets atomically in a single call
-    const addedWallets = (await redis.eval(
-        ADD_WALLETS_SCRIPT,
-        2, // number of keys (availableKey, registeredKey)
-        availableKey,
-        registeredKey,
-        ...entries
-    )) as string[]
-
-    logger.info(
-        { availableKey, registeredKey, addedWallets },
-        "Created redis wallet pool"
-    )
+    // Ensure queue is populated on startup
+    // Avoids race case where queue is populated twice due to multi (atomic txs)
+    if (hasElements === 0) {
+        const multi = redis.multi()
+        multi.del(name)
+        multi.rpush(name, ...entries)
+        await multi.exec()
+    }
 
     return {
-        size: () => redis.scard(availableKey),
-        pop: () => redis.spop(availableKey),
-        push: (entry: string) => redis.sadd(availableKey, entry)
+        llen: () => redis.llen(name),
+        pop: () => redis.rpop(name),
+        push: (entry: string) => redis.lpush(name, entry)
     }
 }
 
@@ -73,13 +38,12 @@ const delay = async (delay: number) => {
 
 export const createRedisSenderManager = async ({
     config,
-    metrics,
-    redisEndpoint
-}: {
-    config: AltoConfig
-    metrics: Metrics
-    redisEndpoint: string
-}): Promise<SenderManager> => {
+    metrics
+}: { config: AltoConfig; metrics: Metrics }): Promise<SenderManager> => {
+    if (!config.redisSenderManagerUrl) {
+        throw new Error("redisSenderManagerUrl is required")
+    }
+
     const wallets = getAvailableWallets(config)
     metrics.walletsTotal.set(wallets.length)
     metrics.walletsAvailable.set(wallets.length)
@@ -90,16 +54,20 @@ export const createRedisSenderManager = async ({
         }
     )
 
-    const redis = new Redis(redisEndpoint)
-    const walletPool = await createRedisWalletPool({
+    const redis = new Redis(config.redisSenderManagerUrl)
+    const redisQueueName = `${config.chainId}:${config.redisSenderManagerQueueName}`
+    const redisQueue = await createRedisQueue({
         redis,
-        config,
-        logger,
+        name: redisQueueName,
         entries: wallets.map((w) => w.address)
     })
 
     // Track active wallets for this instance
     const activeWallets = new Set<Account>()
+
+    logger.info(
+        `Created redis sender manager with queueName: ${redisQueueName}`
+    )
     return {
         getAllWallets: () => [...wallets],
         getWallet: async () => {
@@ -108,7 +76,7 @@ export const createRedisSenderManager = async ({
             let walletAddress: string | null = null
 
             while (!walletAddress) {
-                walletAddress = await walletPool.pop()
+                walletAddress = await redisQueue.pop()
                 await delay(100)
             }
 
@@ -126,7 +94,7 @@ export const createRedisSenderManager = async ({
                 "got wallet from sender manager"
             )
 
-            await walletPool.size().then((len) => {
+            await redisQueue.llen().then((len) => {
                 metrics.walletsAvailable.set(len)
             })
 
@@ -134,8 +102,8 @@ export const createRedisSenderManager = async ({
         },
         markWalletProcessed: async (wallet: Account) => {
             if (activeWallets.delete(wallet)) {
-                await walletPool.push(wallet.address)
-                const len = await walletPool.size()
+                await redisQueue.push(wallet.address)
+                const len = await redisQueue.llen()
                 metrics.walletsAvailable.set(len)
             } else {
                 logger.warn(

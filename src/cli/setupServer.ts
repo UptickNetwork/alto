@@ -3,20 +3,19 @@ import { EventManager, type GasPriceManager } from "@alto/handlers"
 import {
     type InterfaceReputationManager,
     Mempool,
+    Monitor,
     NullReputationManager,
-    ReputationManager,
-    StatusManager
+    ReputationManager
 } from "@alto/mempool"
 import { RpcHandler, SafeValidator, Server, UnsafeValidator } from "@alto/rpc"
-import { createMempoolStore } from "@alto/store"
 import type { InterfaceValidator } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Registry } from "prom-client"
 import type { AltoConfig } from "../createConfig"
-import { BundleManager } from "../executor/bundleManager"
 import { flushOnStartUp } from "../executor/senderManager/flushOnStartUp"
 import { validateAndRefillWallets } from "../executor/senderManager/validateAndRefill"
-import { persistShutdownState, restoreShutdownState } from "./shutDown"
+import { UserOpMonitor } from "../executor/userOpMonitor"
+import { createMempoolStore } from "../store/createMempoolStore"
 
 const getReputationManager = (
     config: AltoConfig
@@ -53,22 +52,20 @@ const getValidator = ({
     })
 }
 
-const getStatusManager = ({
-    config
-}: { config: AltoConfig }): StatusManager => {
-    return new StatusManager({ config })
+const getMonitor = ({ config }: { config: AltoConfig }): Monitor => {
+    return new Monitor({ config })
 }
 
 const getMempool = ({
     config,
-    statusManager,
+    monitor,
     reputationManager,
     validator,
     metrics,
     eventManager
 }: {
     config: AltoConfig
-    statusManager: StatusManager
+    monitor: Monitor
     reputationManager: InterfaceReputationManager
     validator: InterfaceValidator
     metrics: Metrics
@@ -76,7 +73,7 @@ const getMempool = ({
 }): Mempool => {
     return new Mempool({
         config,
-        statusManager,
+        monitor,
         metrics,
         store: createMempoolStore({ config, metrics }),
         reputationManager,
@@ -86,11 +83,13 @@ const getMempool = ({
 }
 
 const getEventManager = ({
-    config
+    config,
+    metrics
 }: {
     config: AltoConfig
+    metrics: Metrics
 }) => {
-    return new EventManager({ config })
+    return new EventManager({ config, metrics })
 }
 
 const getExecutor = ({
@@ -113,7 +112,7 @@ const getExecutorManager = ({
     senderManager,
     metrics,
     gasPriceManager,
-    bundleManager
+    userOpMonitor
 }: {
     config: AltoConfig
     executor: Executor
@@ -121,12 +120,12 @@ const getExecutorManager = ({
     senderManager: SenderManager
     metrics: Metrics
     gasPriceManager: GasPriceManager
-    bundleManager: BundleManager
+    userOpMonitor: UserOpMonitor
 }) => {
     return new ExecutorManager({
         config,
         executor,
-        bundleManager,
+        userOpMonitor,
         mempool,
         senderManager,
         metrics,
@@ -139,10 +138,10 @@ const getRpcHandler = ({
     validator,
     mempool,
     executor,
-    statusManager,
+    monitor,
     executorManager,
     reputationManager,
-    bundleManager,
+    userOpMonitor,
     metrics,
     gasPriceManager,
     eventManager
@@ -151,10 +150,10 @@ const getRpcHandler = ({
     validator: InterfaceValidator
     mempool: Mempool
     executor: Executor
-    statusManager: StatusManager
+    monitor: Monitor
     executorManager: ExecutorManager
     reputationManager: InterfaceReputationManager
-    bundleManager: BundleManager
+    userOpMonitor: UserOpMonitor
     metrics: Metrics
     eventManager: EventManager
     gasPriceManager: GasPriceManager
@@ -164,10 +163,10 @@ const getRpcHandler = ({
         validator,
         mempool,
         executor,
-        statusManager,
+        monitor,
         executorManager,
         reputationManager,
-        bundleManager,
+        userOpMonitor,
         metrics,
         eventManager,
         gasPriceManager
@@ -215,9 +214,12 @@ export const setupServer = async ({
     const reputationManager = getReputationManager(config)
 
     const eventManager = getEventManager({
-        config
+        config,
+        metrics
     })
 
+    // When running with horizontal scaling enabled, only one instance should have this flag enabled,
+    // otherwise all instances will try to refill wallets.
     if (config.refillingWallets) {
         const rootLogger = config.getLogger(
             { module: "root" },
@@ -232,7 +234,7 @@ export const setupServer = async ({
             })
         } catch (error) {
             rootLogger.error(
-                { err: error },
+                { error: error instanceof Error ? error.stack : error },
                 "Error during initial wallet validation and refill"
             )
         }
@@ -247,17 +249,17 @@ export const setupServer = async ({
                 })
             } catch (error) {
                 rootLogger.error(
-                    { err: error },
+                    { error: error instanceof Error ? error.stack : error },
                     "Error during scheduled wallet validation and refill"
                 )
             }
         }, config.executorRefillInterval * 1000)
     }
 
-    const statusManager = getStatusManager({ config })
+    const monitor = getMonitor({ config })
     const mempool = getMempool({
         config,
-        statusManager,
+        monitor,
         reputationManager,
         validator,
         metrics,
@@ -269,19 +271,18 @@ export const setupServer = async ({
         eventManager
     })
 
-    const bundleManager = new BundleManager({
+    const userOpMonitor = new UserOpMonitor({
         config,
         mempool,
-        statusManager,
+        monitor,
         metrics,
         reputationManager,
-        gasPriceManager,
         eventManager,
         senderManager
     })
 
     const executorManager = getExecutorManager({
-        bundleManager,
+        userOpMonitor,
         config,
         executor,
         mempool,
@@ -295,21 +296,16 @@ export const setupServer = async ({
         validator,
         mempool,
         executor,
-        statusManager,
+        monitor,
         executorManager,
         reputationManager,
-        bundleManager,
+        userOpMonitor,
         metrics,
         gasPriceManager,
         eventManager
     })
 
-    // we disable flushing for hs because it tries to flush transactions
-    // of wallets that are in use by other servers
-    if (
-        config.flushStuckTransactionsDuringStartup &&
-        !config.enableHorizontalScaling
-    ) {
+    if (config.flushStuckTransactionsDuringStartup) {
         flushOnStartUp({
             senderManager,
             gasPriceManager,
@@ -322,10 +318,6 @@ export const setupServer = async ({
         { level: config.logLevel }
     )
 
-    if (config.enableHorizontalScaling) {
-        await mempool.clearProcessing()
-    }
-
     const walletsLength = senderManager.getAllWallets().length
     rootLogger.info(`Initialized ${walletsLength} executor wallets`)
 
@@ -336,73 +328,48 @@ export const setupServer = async ({
         metrics
     })
 
-    const shutdownLogger = rootLogger.child(
-        { module: "shutdown" },
-        {
-            level: config.logLevel
-        }
-    )
-
-    // Ignore when horizontal scaling is enabled, because state is already saved between shutdowns.
-    if (!config.enableHorizontalScaling) {
-        restoreShutdownState({
-            mempool,
-            bundleManager,
-            statusManager,
-            config,
-            logger: shutdownLogger,
-            senderManager
-        })
-    }
-
     server.start()
-    executorManager.start()
 
-    let shutdownPromise: Promise<void> | null = null
     const gracefulShutdown = async (signal: string) => {
-        if (shutdownPromise) {
-            // Ensure gracefulShutdown runs once even if called multiple times.
-            return shutdownPromise
+        rootLogger.info(`${signal} received, shutting down`)
+
+        await server.stop()
+        rootLogger.info("server stopped")
+
+        for (const entryPoint of config.entrypoints) {
+            const outstanding = [...(await mempool.dumpOutstanding(entryPoint))]
+            const submitted = [...(await mempool.dumpSubmittedOps(entryPoint))]
+            const processing = [...(await mempool.dumpProcessing(entryPoint))]
+            await mempool.dropUserOps(entryPoint, [
+                ...outstanding.map((userOp) => ({
+                    ...userOp,
+                    reason: "shutdown"
+                })),
+                ...submitted.map((userOp) => ({
+                    ...userOp,
+                    reason: "shutdown"
+                })),
+                ...processing.map((userOp) => ({
+                    ...userOp,
+                    reason: "shutdown"
+                }))
+            ])
+            rootLogger.info(
+                {
+                    outstanding: outstanding.length,
+                    submitted: submitted.length,
+                    processing: processing.length
+                },
+                "dumping mempool before shutdown"
+            )
         }
 
-        shutdownPromise = (async () => {
-            rootLogger.info(`${signal} received, shutting down`)
-            mempool.startShutdown()
+        // mark all executors as processed
+        for (const account of senderManager.getActiveWallets()) {
+            await senderManager.markWalletProcessed(account)
+        }
 
-            // Stop server now and await after bundler cleanup.
-            const stopPromise = server.stop()
-            let cleanupError: unknown
-
-            try {
-                await persistShutdownState({
-                    mempool,
-                    config,
-                    bundleManager,
-                    statusManager,
-                    logger: shutdownLogger
-                })
-                rootLogger.info("shutdown state persisted")
-
-                // mark all executors as processed
-                for (const account of senderManager.getActiveWallets()) {
-                    await senderManager.markWalletProcessed(account)
-                }
-                rootLogger.info("marked all executor wallets as processed")
-            } catch (error) {
-                cleanupError = error
-            }
-
-            await stopPromise
-            rootLogger.info("server stopped")
-
-            if (cleanupError) {
-                throw cleanupError
-            }
-
-            process.exit(0)
-        })()
-
-        return shutdownPromise
+        process.exit(0)
     }
 
     const signals = ["SIGINT", "SIGTERM"]
@@ -414,7 +381,7 @@ export const setupServer = async ({
                 await gracefulShutdown(signal)
             } catch (error) {
                 rootLogger.error(
-                    { err: error },
+                    { error: error instanceof Error ? error.stack : error },
                     `Error during ${signal} shutdown`
                 )
                 process.exit(1)
@@ -422,17 +389,19 @@ export const setupServer = async ({
         })
     }
 
-    const toError = (err: unknown) =>
-        err instanceof Error ? err : new Error(String(err))
-
     // Handle unhandled rejections with the actual rejection reason
     process.on("unhandledRejection", async (err) => {
-        rootLogger.error({ err: toError(err) }, "Unhandled Promise Rejection")
+        rootLogger.error(
+            {
+                err
+            },
+            "Unhandled Promise Rejection"
+        )
         try {
             await gracefulShutdown("unhandledRejection")
-        } catch (shutdownErr) {
+        } catch (err) {
             rootLogger.error(
-                { err: toError(shutdownErr) },
+                { err },
                 "Error during unhandledRejection shutdown"
             )
             process.exit(1)
@@ -441,12 +410,14 @@ export const setupServer = async ({
 
     // Handle uncaught exceptions with the actual error
     process.on("uncaughtException", async (err) => {
-        rootLogger.error({ err: toError(err) }, "Uncaught Exception")
+        rootLogger.error({ err }, "Uncaught Exception")
         try {
             await gracefulShutdown("uncaughtException")
-        } catch (shutdownErr) {
+        } catch (err) {
             rootLogger.error(
-                { err: toError(shutdownErr) },
+                {
+                    err
+                },
                 "Error during uncaughtException shutdown"
             )
             process.exit(1)

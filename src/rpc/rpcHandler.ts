@@ -7,61 +7,54 @@ import type { EventManager, GasPriceManager } from "@alto/handlers"
 import type {
     InterfaceReputationManager,
     Mempool,
-    StatusManager
+    Monitor
 } from "@alto/mempool"
+import type { ApiVersion, BundlerRequest } from "@alto/types"
 import {
     type Address,
-    type ApiVersion,
-    type BundlerRequest,
-    ERC7769Errors,
     EntryPointV06Abi,
     EntryPointV07Abi,
     type InterfaceValidator,
     RpcError,
-    type UserOperation
+    type UserOperation,
+    ValidationErrors
 } from "@alto/types"
-import {
-    type Logger,
-    type Metrics,
-    getNonceKeyAndSequence,
-    isVersion06,
-    isVersion07,
-    validatePaymasterSignature
-} from "@alto/utils"
+import type { Logger, Metrics } from "@alto/utils"
+import { getNonceKeyAndSequence, isVersion06, isVersion07 } from "@alto/utils"
 import { getContract, zeroAddress } from "viem"
+import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { recoverAuthorizationAddress } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
-import type { BundleManager } from "../executor/bundleManager"
-import { getEip7702AuthAddress } from "../utils/eip7702"
+import type { UserOpMonitor } from "../executor/userOpMonitor"
 import type { MethodHandler } from "./createMethodHandler"
 import { registerHandlers } from "./methods"
 
 export class RpcHandler {
-    public readonly config: AltoConfig
-    public readonly validator: InterfaceValidator
-    public readonly mempool: Mempool
-    public readonly executor: Executor
-    public readonly statusManager: StatusManager
-    public readonly executorManager: ExecutorManager
-    public readonly reputationManager: InterfaceReputationManager
-    public readonly metrics: Metrics
-    public readonly eventManager: EventManager
-    public readonly gasPriceManager: GasPriceManager
-    public readonly bundleManager: BundleManager
-    public readonly logger: Logger
+    public config: AltoConfig
+    public validator: InterfaceValidator
+    public mempool: Mempool
+    public executor: Executor
+    public monitor: Monitor
+    public executorManager: ExecutorManager
+    public reputationManager: InterfaceReputationManager
+    public metrics: Metrics
+    public eventManager: EventManager
+    public gasPriceManager: GasPriceManager
+    public userOpMonitor: UserOpMonitor
+    public logger: Logger
 
-    private readonly methodHandlers: Map<string, MethodHandler>
-    private readonly eip7702CodeCache: Map<Address, boolean>
+    private methodHandlers: Map<string, MethodHandler>
+    private eip7702CodeCache: Map<Address, boolean>
 
     constructor({
         config,
         validator,
         mempool,
         executor,
-        statusManager,
+        monitor,
         executorManager,
         reputationManager,
-        bundleManager,
+        userOpMonitor,
         metrics,
         eventManager,
         gasPriceManager
@@ -70,10 +63,10 @@ export class RpcHandler {
         validator: InterfaceValidator
         mempool: Mempool
         executor: Executor
-        statusManager: StatusManager
+        monitor: Monitor
         executorManager: ExecutorManager
         reputationManager: InterfaceReputationManager
-        bundleManager: BundleManager
+        userOpMonitor: UserOpMonitor
         metrics: Metrics
         eventManager: EventManager
         gasPriceManager: GasPriceManager
@@ -82,13 +75,13 @@ export class RpcHandler {
         this.validator = validator
         this.mempool = mempool
         this.executor = executor
-        this.statusManager = statusManager
+        this.monitor = monitor
         this.executorManager = executorManager
         this.reputationManager = reputationManager
         this.metrics = metrics
         this.eventManager = eventManager
         this.gasPriceManager = gasPriceManager
-        this.bundleManager = bundleManager
+        this.userOpMonitor = userOpMonitor
 
         this.logger = config.getLogger(
             { module: "rpc" },
@@ -112,7 +105,7 @@ export class RpcHandler {
         if (!handler) {
             throw new RpcError(
                 "Method not supported",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -129,7 +122,7 @@ export class RpcHandler {
                 `EntryPoint ${entryPoint} not supported, supported EntryPoints: ${this.config.entrypoints.join(
                     ", "
                 )}`,
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
     }
@@ -142,44 +135,11 @@ export class RpcHandler {
         }
     }
 
-    validateUserOpFields({
-        userOp,
-        entryPoint,
-        isBoosted = false,
-        isEstimation = false
-    }: {
-        userOp: UserOperation
-        entryPoint: Address
-        isBoosted?: boolean
-        isEstimation?: boolean
-    }): [boolean, string] {
-        // Check for 0x7702 factory without eip7702Auth
-        if (
-            !userOp.eip7702Auth &&
-            isVersion07(userOp) &&
-            (userOp.factory === "0x7702" ||
-                userOp.factory === "0x7702000000000000000000000000000000000000")
-        ) {
-            return [
-                false,
-                "Invalid EIP-7702 userOperation: factory is 0x7702 but eip7702Auth is not provided."
-            ]
-        }
-
-        // Skip gas/field checks during estimation
-        if (isEstimation) {
-            return [true, ""]
-        }
-
-        // Validate paymaster signature for EntryPoint 0.9
-        const paymasterSignatureError = validatePaymasterSignature({
-            userOp,
-            entryPoint
-        })
-        if (paymasterSignatureError) {
-            return [false, paymasterSignatureError]
-        }
-
+    async preMempoolChecks(
+        userOp: UserOperation,
+        apiVersion: ApiVersion,
+        boost = false
+    ): Promise<[boolean, string]> {
         if (
             this.config.legacyTransactions &&
             userOp.maxFeePerGas !== userOp.maxPriorityFeePerGas
@@ -190,11 +150,33 @@ export class RpcHandler {
             ]
         }
 
-        if (userOp.verificationGasLimit < 10_000n) {
+        if (apiVersion !== "v1" && !this.config.safeMode && !boost) {
+            const { lowestMaxFeePerGas, lowestMaxPriorityFeePerGas } =
+                await this.gasPriceManager.getLowestValidGasPrices()
+
+            const maxFeePerGas = userOp.maxFeePerGas
+            const maxPriorityFeePerGas = userOp.maxPriorityFeePerGas
+
+            if (maxFeePerGas < lowestMaxFeePerGas) {
+                return [
+                    false,
+                    `maxFeePerGas must be at least ${lowestMaxFeePerGas} (current maxFeePerGas: ${maxFeePerGas}) - use pimlico_getUserOperationGasPrice to get the current gas price`
+                ]
+            }
+
+            if (maxPriorityFeePerGas < lowestMaxPriorityFeePerGas) {
+                return [
+                    false,
+                    `maxPriorityFeePerGas must be at least ${lowestMaxPriorityFeePerGas} (current maxPriorityFeePerGas: ${maxPriorityFeePerGas}) - use pimlico_getUserOperationGasPrice to get the current gas price`
+                ]
+            }
+        }
+
+        if (userOp.verificationGasLimit < 10000n) {
             return [false, "verificationGasLimit must be at least 10000"]
         }
 
-        if (!isBoosted && userOp.preVerificationGas === 0n) {
+        if (!boost && userOp.preVerificationGas === 0n) {
             return [
                 false,
                 "userOperation preVerification gas must be larger than 0"
@@ -210,49 +192,13 @@ export class RpcHandler {
 
         const gasLimits = calculateAA95GasFloor({
             userOps: [userOp],
-            beneficiary: this.config.utilityWalletAddress
+            beneficiary: privateKeyToAddress(generatePrivateKey())
         })
 
-        if (gasLimits > this.config.maxGasPerUserOp) {
+        if (gasLimits > this.config.maxGasPerBundle) {
             return [
                 false,
-                `User operation gas limits exceed the max gas per userOp: ${gasLimits} > ${this.config.maxGasPerUserOp}`
-            ]
-        }
-
-        return [true, ""]
-    }
-
-    async validateUserOpGasPrice({
-        userOp,
-        apiVersion,
-        isBoosted = false
-    }: {
-        userOp: UserOperation
-        apiVersion: ApiVersion
-        isBoosted?: boolean
-    }): Promise<[boolean, string]> {
-        if (apiVersion === "v1" || this.config.safeMode || isBoosted) {
-            return [true, ""]
-        }
-
-        const { lowestMaxFeePerGas, lowestMaxPriorityFeePerGas } =
-            await this.gasPriceManager.getLowestValidGasPrices()
-
-        const maxFeePerGas = userOp.maxFeePerGas
-        const maxPriorityFeePerGas = userOp.maxPriorityFeePerGas
-
-        if (maxFeePerGas < lowestMaxFeePerGas) {
-            return [
-                false,
-                `maxFeePerGas must be at least ${lowestMaxFeePerGas} (current maxFeePerGas: ${maxFeePerGas}) - use pimlico_getUserOperationGasPrice to get the current gas price`
-            ]
-        }
-
-        if (maxPriorityFeePerGas < lowestMaxPriorityFeePerGas) {
-            return [
-                false,
-                `maxPriorityFeePerGas must be at least ${lowestMaxPriorityFeePerGas} (current maxPriorityFeePerGas: ${maxPriorityFeePerGas}) - use pimlico_getUserOperationGasPrice to get the current gas price`
+                `User operation gas limits exceed the max gas per bundle: ${gasLimits} > ${this.config.maxGasPerBundle}`
             ]
         }
 
@@ -261,43 +207,27 @@ export class RpcHandler {
 
     async validateEip7702Auth({
         userOp,
-        validateSignature
-    }: { userOp: UserOperation; validateSignature: boolean }): Promise<
+        validateSender = false
+    }: { userOp: UserOperation; validateSender?: boolean }): Promise<
         [boolean, string]
     > {
         if (!userOp.eip7702Auth) {
             return [true, ""]
         }
 
-        if (!this.config.codeOverrideSupport || !this.config.eip7702Support) {
-            return [
-                false,
-                "EIP-7702 user operations are not supported on this chain"
-            ]
+        if (!this.config.codeOverrideSupport) {
+            return [false, "eip7702Auth is not supported on this chain"]
         }
 
         // Check that auth is valid.
-        const delegationDesignator = getEip7702AuthAddress(userOp.eip7702Auth)
-
-        // Validate ECDSA signature components during submission only
-        // (during estimation, users send stub authorizations with dummy r/s)
-        if (validateSignature) {
-            const SECP256K1_N =
-                0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
-            const r = BigInt(userOp.eip7702Auth.r)
-            const s = BigInt(userOp.eip7702Auth.s)
-
-            if (r < 1n || r >= SECP256K1_N || s < 1n || s >= SECP256K1_N) {
-                return [
-                    false,
-                    "Invalid EIP-7702 authorization: Invalid ECDSA signature (r and s must be in [1, secp256k1.n))"
-                ]
-            }
-        }
+        const delegationDesignator =
+            "address" in userOp.eip7702Auth
+                ? userOp.eip7702Auth.address
+                : userOp.eip7702Auth.contractAddress
 
         // Fetch onchain data in parallel
         const [sender, nonceOnChain, delegateCode] = await Promise.all([
-            validateSignature
+            validateSender
                 ? recoverAuthorizationAddress({
                       authorization: {
                           address: delegationDesignator,
@@ -309,12 +239,12 @@ export class RpcHandler {
                           yParity: userOp.eip7702Auth.yParity
                       }
                   })
-                : userOp.sender,
+                : Promise.resolve(userOp.sender),
             this.config.publicClient.getTransactionCount({
                 address: userOp.sender
             }),
             this.eip7702CodeCache.has(delegationDesignator)
-                ? "has-code"
+                ? Promise.resolve("has-code")
                 : this.config.publicClient.getCode({
                       address: delegationDesignator
                   })
@@ -361,12 +291,11 @@ export class RpcHandler {
         if (
             isVersion07(userOp) &&
             userOp.factory !== "0x7702" &&
-            userOp.factory !== "0x7702000000000000000000000000000000000000" &&
             userOp.factory !== null
         ) {
             return [
                 false,
-                "Invalid EIP-7702 authorization: factory must be null or 0x7702."
+                "Invalid EIP-7702 authorization: UserOperation cannot contain factory that is neither null or 0x7702."
             ]
         }
 
@@ -395,10 +324,7 @@ export class RpcHandler {
         return [true, ""]
     }
 
-    async getNonceSeq({
-        userOp,
-        entryPoint
-    }: { userOp: UserOperation; entryPoint: Address }) {
+    async getNonceSeq(userOp: UserOperation, entryPoint: Address) {
         const entryPointContract = getContract({
             address: entryPoint,
             abi: isVersion06(userOp) ? EntryPointV06Abi : EntryPointV07Abi,

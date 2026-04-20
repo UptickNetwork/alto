@@ -14,7 +14,6 @@ import {
     entryPoint07Abi,
     entryPoint07Address,
     entryPoint08Address,
-    entryPoint09Address,
     getUserOperationHash,
     toPackedUserOperation
 } from "viem/account-abstraction"
@@ -31,7 +30,7 @@ import {
     deployRevertingContract,
     getRevertCall
 } from "../src/revertingContract.js"
-import { deployPaymaster, encodePaymasterData } from "../src/testPaymaster.js"
+import { deployPaymaster } from "../src/testPaymaster.js"
 import {
     beforeEachCleanUp,
     getPublicClient,
@@ -52,10 +51,6 @@ describe.each([
     {
         entryPoint: entryPoint08Address,
         entryPointVersion: "0.8" as EntryPointVersion
-    },
-    {
-        entryPoint: entryPoint09Address,
-        entryPointVersion: "0.9" as EntryPointVersion
     }
 ])(
     "$entryPointVersion supports eth_getUserOperationReceipt",
@@ -106,10 +101,7 @@ describe.each([
                         }
                     ]),
                     initCode: concat([factory as Hex, factoryData as Hex]),
-                    paymasterAndData: concat([
-                        paymaster,
-                        encodePaymasterData()
-                    ]),
+                    paymasterAndData: paymaster,
                     callGasLimit: 500_000n,
                     verificationGasLimit: 500_000n,
                     preVerificationGas: 500_000n,
@@ -137,7 +129,6 @@ describe.each([
                     maxFeePerGas: parseGwei("10"),
                     maxPriorityFeePerGas: parseGwei("10"),
                     paymaster,
-                    paymasterData: encodePaymasterData(),
                     paymasterVerificationGasLimit: 100_000n,
                     paymasterPostOpGasLimit: 50_000n
                 } as UserOperation<"0.7">
@@ -203,7 +194,7 @@ describe.each([
                             value: 0n
                         }
                     ],
-                    paymasterAndData: concat([paymaster, encodePaymasterData()])
+                    paymasterAndData: paymaster
                 })
             } else {
                 hash = await smartAccountClient.sendUserOperation({
@@ -215,7 +206,6 @@ describe.each([
                         }
                     ],
                     paymaster: paymaster,
-                    paymasterData: encodePaymasterData(),
                     paymasterVerificationGasLimit: 1_500_000n,
                     paymasterPostOpGasLimit: 500_000n
                 })

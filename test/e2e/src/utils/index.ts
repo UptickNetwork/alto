@@ -26,11 +26,7 @@ import {
     privateKeyToAddress
 } from "viem/accounts"
 import { foundry } from "viem/chains"
-import {
-    getEntryPointAbi,
-    getEntryPointAddress,
-    getSimpleAccountFactoryAddress
-} from "./entrypoint.ts"
+import { getEntryPointAddress } from "./entrypoint.ts"
 
 export const getAnvilWalletClient = ({
     addressIndex,
@@ -100,25 +96,10 @@ export const getSmartAccountClient = async ({
 
     let account: SmartAccount
 
-    if (use7702 && entryPointVersion === "0.9") {
+    if (use7702 && entryPointVersion === "0.8") {
         account = await toSimple7702SmartAccount({
             owner: privateKeyToAccount(privateKey),
-            client: publicClient,
-            entryPoint: {
-                address: getEntryPointAddress(entryPointVersion),
-                abi: getEntryPointAbi(entryPointVersion),
-                version: "0.8" // TODO: Remove this if block once permissionless.js's toSimple7702SmartAccount supports 0.9
-            }
-        })
-    } else if (use7702 && entryPointVersion === "0.8") {
-        account = await toSimple7702SmartAccount({
-            owner: privateKeyToAccount(privateKey),
-            client: publicClient,
-            entryPoint: {
-                address: getEntryPointAddress(entryPointVersion),
-                abi: getEntryPointAbi(entryPointVersion),
-                version: entryPointVersion
-            }
+            client: publicClient
         })
     } else if (use7702) {
         account = await toSimpleSmartAccount({
@@ -135,16 +116,6 @@ export const getSmartAccountClient = async ({
             factory: undefined,
             factoryData: undefined
         })
-    } else if (entryPointVersion === "0.9") {
-        account = await toSimpleSmartAccount({
-            client: publicClient,
-            entryPoint: {
-                address: getEntryPointAddress(entryPointVersion),
-                version: "0.8" // TODO: Remove this if block once permissionless.js's toSimple7702SmartAccount supports 0.9
-            },
-            factoryAddress: getSimpleAccountFactoryAddress(entryPointVersion),
-            owner: privateKeyToAccount(privateKey)
-        })
     } else {
         account = await toSimpleSmartAccount({
             client: publicClient,
@@ -152,7 +123,6 @@ export const getSmartAccountClient = async ({
                 address: getEntryPointAddress(entryPointVersion),
                 version: entryPointVersion
             },
-            factoryAddress: getSimpleAccountFactoryAddress(entryPointVersion),
             owner: privateKeyToAccount(privateKey)
         })
     }
@@ -262,8 +232,6 @@ export const getSimple7702AccountImplementationAddress = (
     entryPointVersion: EntryPointVersion
 ) => {
     switch (entryPointVersion) {
-        case "0.9":
-            return "0xa46cc63eBF4Bd77888AA327837d20b23A63a56B5"
         case "0.8":
             return "0xe6Cae83BdE06E4c305530e199D7217f42808555B"
         case "0.7":

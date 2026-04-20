@@ -10,7 +10,7 @@ export type StakeInfo = {
     unstakeDelaySec: bigint
 }
 
-type SlotMap = {
+export type SlotMap = {
     [slot: string]: string
 }
 
@@ -21,40 +21,50 @@ export type StorageMap = {
 // hexnum regex
 const hexPattern = /^0x[0-9a-f]*$/
 
-const signatureValidationFailedSchema = z
+export const signatureValidationFailedSchema = z
     .tuple([addressSchema])
     .transform((val) => {
         return { aggregator: val[0] }
     })
 
-const signatureValidationFailedErrorSchema = z.object({
+export type SignatureValidationFailed = z.infer<
+    typeof signatureValidationFailedSchema
+>
+
+export const signatureValidationFailedErrorSchema = z.object({
     args: signatureValidationFailedSchema,
     errorName: z.literal("SignatureValidationFailed")
 })
 
-const senderAddressResultSchema = z.tuple([addressSchema]).transform((val) => {
-    return {
-        sender: val[0]
-    }
-})
+export const senderAddressResultSchema = z
+    .tuple([addressSchema])
+    .transform((val) => {
+        return {
+            sender: val[0]
+        }
+    })
 
-const senderAddressResultErrorSchema = z.object({
+export type SenderAddressResult = z.infer<typeof senderAddressResultSchema>
+
+export const senderAddressResultErrorSchema = z.object({
     args: senderAddressResultSchema,
     errorName: z.literal("SenderAddressResult")
 })
 
-const failedOpSchema = z.tuple([z.bigint(), z.string()]).transform((val) => {
-    return { opIndex: val[0], reason: val[1] }
-})
+export const failedOpSchema = z
+    .tuple([z.bigint(), z.string()])
+    .transform((val) => {
+        return { opIndex: val[0], reason: val[1] }
+    })
 
 export type FailedOp = z.infer<typeof failedOpSchema>
 
-const failedOpErrorSchema = z.object({
+export const failedOpErrorSchema = z.object({
     args: failedOpSchema,
     errorName: z.literal("FailedOp")
 })
 
-const failedOpWithRevertSchema = z
+export const failedOpWithRevertSchema = z
     .tuple([z.bigint(), z.string(), z.string()])
     .transform((val) => {
         return { opIndex: val[0], reason: val[1], inner: val[2] }
@@ -62,7 +72,12 @@ const failedOpWithRevertSchema = z
 
 export type FailedOpWithRevert = z.infer<typeof failedOpWithRevertSchema>
 
-const executionResultSchema06 = z
+export const failedOpWithRevertErrorSchema = z.object({
+    args: failedOpWithRevertSchema,
+    errorName: z.literal("FailedOpWithRevert")
+})
+
+export const executionResultSchemaV06 = z
     .tuple([
         z.bigint(),
         z.bigint(),
@@ -82,7 +97,7 @@ const executionResultSchema06 = z
         }
     })
 
-const executionResultSchema07 = z
+export const executionResultSchemaV07 = z
     .tuple([
         z.bigint(),
         z.bigint(),
@@ -107,13 +122,13 @@ const executionResultSchema07 = z
     })
 
 export const executionResultSchema = z.union([
-    executionResultSchema06,
-    executionResultSchema07
+    executionResultSchemaV06,
+    executionResultSchemaV07
 ])
 
 export type ExecutionResult = z.infer<typeof executionResultSchema>
 
-const executionResultErrorSchema = z.object({
+export const executionResultErrorSchema = z.object({
     args: executionResultSchema,
     errorName: z.literal("ExecutionResult")
 })
@@ -124,131 +139,170 @@ const stakeInfoSchema = z.object({
     unstakeDelaySec: z.bigint()
 })
 
-const validationResultSchema06 = z
-    .union([
-        // Without aggregation - 4 element tuple
-        z.tuple([
-            z.object({
-                preOpGas: z.bigint(),
-                prefund: z.bigint(),
-                sigFailed: z.boolean(),
-                validAfter: z.number(),
-                validUntil: z.number(),
-                paymasterContext: z
-                    .string()
-                    .regex(hexPattern)
-                    .transform((val) => val as HexData)
-            }),
-            stakeInfoSchema,
-            stakeInfoSchema.optional(),
-            stakeInfoSchema.optional()
-        ]),
-        // With aggregation - 5 element tuple
-        z.tuple([
-            z.object({
-                preOpGas: z.bigint(),
-                prefund: z.bigint(),
-                sigFailed: z.boolean(),
-                validAfter: z.number(),
-                validUntil: z.number(),
-                paymasterContext: z
-                    .string()
-                    .regex(hexPattern)
-                    .transform((val) => val as HexData)
-            }),
-            stakeInfoSchema,
-            stakeInfoSchema.optional(),
-            stakeInfoSchema.optional(),
-            z.object({
-                aggregator: addressSchema,
-                stakeInfo: stakeInfoSchema
-            })
-        ])
+export const validationResultSchemaV06 = z
+    .tuple([
+        z.object({
+            preOpGas: z.bigint(),
+            prefund: z.bigint(),
+            sigFailed: z.boolean(),
+            validAfter: z.number(),
+            validUntil: z.number(),
+            paymasterContext: z
+                .string()
+                .regex(hexPattern)
+                .transform((val) => val as HexData)
+        }),
+        stakeInfoSchema,
+        stakeInfoSchema.optional(),
+        stakeInfoSchema.optional()
     ])
-    .transform((val) => ({
-        returnInfo: val[0],
-        senderInfo: val[1],
-        factoryInfo: val[2],
-        paymasterInfo: val[3],
-        aggregatorInfo: val[4]
-    }))
+    .transform((val) => {
+        return {
+            returnInfo: val[0],
+            senderInfo: val[1],
+            factoryInfo: val[2],
+            paymasterInfo: val[3]
+        }
+    })
 
-const validationResultSchema07 = z
-    .union([
-        // Without aggregation - 4 element tuple
-        z.tuple([
-            z.object({
-                preOpGas: z.bigint(),
-                prefund: z.bigint(),
-                accountValidationData: z.bigint(),
-                paymasterValidationData: z.bigint(),
-                accountSigFailed: z.boolean().optional(),
-                paymasterSigFailed: z.boolean().optional(),
-                validAfter: z.number().optional(),
-                validUntil: z.number().optional(),
-                paymasterContext: z
-                    .string()
-                    .regex(hexPattern)
-                    .transform((val) => val as HexData)
-            }),
-            stakeInfoSchema,
-            stakeInfoSchema.optional(),
-            stakeInfoSchema.optional()
-        ]),
-        // With aggregation - 5 element tuple
-        z.tuple([
-            z.object({
-                preOpGas: z.bigint(),
-                prefund: z.bigint(),
-                accountValidationData: z.bigint(),
-                paymasterValidationData: z.bigint(),
-                accountSigFailed: z.boolean().optional(),
-                paymasterSigFailed: z.boolean().optional(),
-                validAfter: z.number().optional(),
-                validUntil: z.number().optional(),
-                paymasterContext: z
-                    .string()
-                    .regex(hexPattern)
-                    .transform((val) => val as HexData)
-            }),
-            stakeInfoSchema,
-            stakeInfoSchema.optional(),
-            stakeInfoSchema.optional(),
-            z.object({
-                aggregator: addressSchema,
-                stakeInfo: stakeInfoSchema
-            })
-        ])
+export const validationResultSchemaV07 = z
+    .tuple([
+        z.object({
+            preOpGas: z.bigint(),
+            prefund: z.bigint(),
+            accountValidationData: z.bigint(),
+            paymasterValidationData: z.bigint(),
+            accountSigFailed: z.boolean().optional(),
+            paymasterSigFailed: z.boolean().optional(),
+            validAfter: z.number().optional(),
+            validUntil: z.number().optional(),
+            paymasterContext: z
+                .string()
+                .regex(hexPattern)
+                .transform((val) => val as HexData)
+        }),
+        stakeInfoSchema,
+        stakeInfoSchema.optional(),
+        stakeInfoSchema.optional()
     ])
-    .transform((val) => ({
-        returnInfo: val[0],
-        senderInfo: val[1],
-        factoryInfo: val[2],
-        paymasterInfo: val[3],
-        aggregatorInfo: val[4]
-    }))
+    .transform((val) => {
+        return {
+            returnInfo: val[0],
+            senderInfo: val[1],
+            factoryInfo: val[2],
+            paymasterInfo: val[3]
+        }
+    })
 
 export const validationResultSchema = z.union([
-    validationResultSchema06,
-    validationResultSchema07
+    validationResultSchemaV06,
+    validationResultSchemaV07
 ])
 
-export type ValidationResult06 = z.infer<typeof validationResultSchema06>
-export type ValidationResult07 = z.infer<typeof validationResultSchema07>
+export type ValidationResultV06 = z.infer<typeof validationResultSchemaV06>
+export type ValidationResultV07 = z.infer<typeof validationResultSchemaV07>
 
 export type ValidationResult = z.infer<typeof validationResultSchema>
 
-const validationResultErrorSchema = z.object({
+export const validationResultErrorSchema = z.object({
     args: validationResultSchema,
     errorName: z.literal("ValidationResult")
 })
 
-const validationResultWithAggregationErrorSchema = z.object({
-    args: validationResultSchema,
+export type ValidationResultError = z.infer<typeof validationResultErrorSchema>
+
+export const validationResultWithAggregationSchemaV06 = z
+    .tuple([
+        z.object({
+            preOpGas: z.bigint(),
+            prefund: z.bigint(),
+            sigFailed: z.boolean(),
+            validAfter: z.number(),
+            validUntil: z.number(),
+            paymasterContext: z
+                .string()
+                .regex(hexPattern)
+                .transform((val) => val as HexData)
+        }),
+        stakeInfoSchema,
+        stakeInfoSchema.optional(),
+        stakeInfoSchema.optional(),
+        z
+            .object({
+                aggregator: addressSchema,
+                stakeInfo: stakeInfoSchema
+            })
+            .optional()
+    ])
+    .transform((val) => {
+        return {
+            returnInfo: val[0],
+            senderInfo: val[1],
+            factoryInfo: val[2],
+            paymasterInfo: val[3],
+            aggregatorInfo: val[4]
+        }
+    })
+
+export const validationResultWithAggregationSchemaV07 = z
+    .tuple([
+        z.object({
+            preOpGas: z.bigint(),
+            prefund: z.bigint(),
+            accountValidationData: z.bigint(),
+            paymasterValidationData: z.bigint(),
+            accountSigFailed: z.boolean().optional(),
+            paymasterSigFailed: z.boolean().optional(),
+            validAfter: z.number().optional(),
+            validUntil: z.number().optional(),
+            paymasterContext: z
+                .string()
+                .regex(hexPattern)
+                .transform((val) => val as HexData)
+        }),
+        stakeInfoSchema,
+        stakeInfoSchema.optional(),
+        stakeInfoSchema.optional(),
+        z
+            .object({
+                aggregator: addressSchema,
+                stakeInfo: stakeInfoSchema
+            })
+            .optional()
+    ])
+    .transform((val) => {
+        return {
+            returnInfo: val[0],
+            senderInfo: val[1],
+            factoryInfo: val[2],
+            paymasterInfo: val[3],
+            aggregatorInfo: val[4]
+        }
+    })
+
+export const validationResultWithAggregationSchema = z.union([
+    validationResultWithAggregationSchemaV06,
+    validationResultWithAggregationSchemaV07
+])
+
+export type ValidationResultWithAggregationV06 = z.infer<
+    typeof validationResultWithAggregationSchemaV06
+>
+
+export type ValidationResultWithAggregationV07 = z.infer<
+    typeof validationResultWithAggregationSchemaV07
+>
+
+export type ValidationResultWithAggregation = z.infer<
+    typeof validationResultWithAggregationSchema
+>
+
+export const validationResultWithAggregationErrorSchema = z.object({
+    args: validationResultWithAggregationSchema,
     errorName: z.literal("ValidationResultWithAggregation")
 })
 
-const entryPointErrorsSchema = z.discriminatedUnion("errorName", [
+export const entryPointErrorsSchema = z.discriminatedUnion("errorName", [
     validationResultErrorSchema,
     executionResultErrorSchema,
     failedOpErrorSchema,
@@ -257,12 +311,14 @@ const entryPointErrorsSchema = z.discriminatedUnion("errorName", [
     validationResultWithAggregationErrorSchema
 ])
 
-const errorCauseSchema = z.object({
+export const errorCauseSchema = z.object({
     name: z.literal("ContractFunctionRevertedError"),
     data: entryPointErrorsSchema
 })
 
-const vmExecutionError = z.object({
+export type ErrorCause = z.infer<typeof errorCauseSchema>
+
+export const vmExecutionError = z.object({
     name: z.literal("CallExecutionError"),
     cause: z.object({
         name: z.literal("RpcRequestError"),
@@ -293,7 +349,7 @@ const vmExecutionError = z.object({
     })
 })
 
-export const entryPointExecutionErrorSchema06 = z
+export const entryPointExecutionErrorSchemaV06 = z
     .object({
         name: z.literal("ContractFunctionExecutionError"),
         cause: z.discriminatedUnion("name", [
@@ -308,7 +364,11 @@ export const entryPointExecutionErrorSchema06 = z
         return val.cause.data
     })
 
-export const entryPointExecutionErrorSchema07 = z
+export type EntryPointExecutionErrorV06 = z.infer<
+    typeof entryPointExecutionErrorSchemaV06
+>
+
+export const entryPointExecutionErrorSchemaV07 = z
     .object({
         name: z.literal("ContractFunctionExecutionError"),
         cause: z.discriminatedUnion("name", [
@@ -322,3 +382,7 @@ export const entryPointExecutionErrorSchema07 = z
         }
         return val.cause.data
     })
+
+export type EntryPointExecutionErrorV07 = z.infer<
+    typeof entryPointExecutionErrorSchemaV07
+>

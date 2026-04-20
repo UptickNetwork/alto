@@ -1,9 +1,10 @@
 import {
-    ERC7769Errors,
+    ExecutionErrors,
     RpcError,
     type UserOperation,
-    type UserOperation06,
-    type UserOperation07,
+    type UserOperationV06,
+    type UserOperationV07,
+    ValidationErrors,
     pimlicoSimulateAssetChangeSchema,
     pimlicoSimulationsAbi
 } from "@alto/types"
@@ -40,7 +41,7 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
             logger.warn("pimlicoSimulation must be provided")
             throw new RpcError(
                 "pimlicoSimulation must be provided",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
 
@@ -53,19 +54,30 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
             client: rpcHandler.config.publicClient
         })
 
+        let epSimulationsAddress: Address | undefined
+        if (is08) {
+            epSimulationsAddress =
+                rpcHandler.config.entrypointSimulationContractV8
+        } else if (is07) {
+            epSimulationsAddress =
+                rpcHandler.config.entrypointSimulationContractV7
+        }
+
         // Prepare state override based on version
         let stateOverride: StateOverride | undefined
         if (isVersion06(userOp) && rpcHandler.config.codeOverrideSupport) {
             stateOverride = getFilterOpsStateOverride({
                 version: "0.6",
                 entryPoint,
-                baseFeePerGas: await rpcHandler.gasPriceManager.getBaseFee()
+                baseFeePerGas: await rpcHandler.gasPriceManager
+                    .getBaseFee()
+                    .catch(() => 0n)
             })
         } else if (is07 || is08) {
             stateOverride = await prepareSimulationOverrides07({
-                userOp: userOp as UserOperation07,
+                userOp: userOp as UserOperationV07,
                 queuedUserOps: [],
-                entryPoint,
+                epSimulationsAddress: epSimulationsAddress as Address,
                 gasPriceManager: rpcHandler.gasPriceManager,
                 userStateOverrides: stateOverrides,
                 config: rpcHandler.config
@@ -81,20 +93,13 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
             }[]
 
             if (is08) {
-                if (!rpcHandler.config.entrypointSimulationContractV8) {
-                    throw new RpcError(
-                        "missing entrypointSimulationContractV8",
-                        ERC7769Errors.InvalidFields
-                    )
-                }
-
                 // For EntryPoint v0.8
                 const { result: simResult } =
                     await pimlicoSimulation.simulate.simulateAssetChange08(
                         [
-                            toPackedUserOp(userOp as UserOperation07),
+                            toPackedUserOp(userOp as UserOperationV07),
                             entryPoint,
-                            rpcHandler.config.entrypointSimulationContractV8,
+                            epSimulationsAddress as Address,
                             addresses,
                             tokens
                         ],
@@ -104,20 +109,13 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
                     )
                 result = [...simResult]
             } else if (is07) {
-                if (!rpcHandler.config.entrypointSimulationContractV7) {
-                    throw new RpcError(
-                        "missing entrypointSimulationContractV7",
-                        ERC7769Errors.InvalidFields
-                    )
-                }
-
                 // For EntryPoint v0.7
                 const { result: simResult } =
                     await pimlicoSimulation.simulate.simulateAssetChange07(
                         [
-                            toPackedUserOp(userOp as UserOperation07),
+                            toPackedUserOp(userOp as UserOperationV07),
                             entryPoint,
-                            rpcHandler.config.entrypointSimulationContractV7,
+                            epSimulationsAddress as Address,
                             addresses,
                             tokens
                         ],
@@ -130,7 +128,7 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
                 const { result: simResult } =
                     await pimlicoSimulation.simulate.simulateAssetChange06(
                         [
-                            userOp as UserOperation06,
+                            userOp as UserOperationV06,
                             entryPoint,
                             addresses,
                             tokens
@@ -158,7 +156,7 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
             if (decodedError.result === "failed") {
                 throw new RpcError(
                     `UserOperation reverted during simulation with reason: ${decodedError.data}`,
-                    ERC7769Errors.UserOperationReverted
+                    ExecutionErrors.UserOperationReverted
                 )
             }
 
@@ -166,7 +164,7 @@ export const pimlicoSimulateAssetChangeHandler = createMethodHandler({
 
             throw new RpcError(
                 "Failed to decode simulation error",
-                ERC7769Errors.InvalidFields
+                ValidationErrors.InvalidFields
             )
         }
     }

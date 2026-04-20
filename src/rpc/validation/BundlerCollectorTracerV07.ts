@@ -182,7 +182,7 @@ export function bundlerCollectorTracer(): BundlerCollectorTracer {
                 return
             }
             this.calls.push({
-                type: frame.getError() === null ? "RETURN" : "REVERT",
+                type: frame.getError() != null ? "REVERT" : "RETURN",
                 gasUsed: frame.getGasUsed(),
                 data: toHex(frame.getOutput()).slice(0, 4000) as Hex
             })

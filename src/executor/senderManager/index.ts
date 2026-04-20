@@ -25,7 +25,6 @@ export const getAvailableWallets = (config: AltoConfig) => {
 export type SenderManager = {
     getAllWallets: () => Account[]
     getWallet: () => Promise<Account>
-    lockWallet?: (wallet: Account) => Promise<void>
     markWalletProcessed: (wallet: Account) => Promise<void>
     getActiveWallets: () => Account[]
 }
@@ -34,12 +33,8 @@ export const getSenderManager = async ({
     config,
     metrics
 }: { config: AltoConfig; metrics: Metrics }): Promise<SenderManager> => {
-    if (config.enableHorizontalScaling && config.redisEndpoint) {
-        return await createRedisSenderManager({
-            config,
-            metrics,
-            redisEndpoint: config.redisEndpoint
-        })
+    if (config.redisSenderManagerUrl) {
+        return await createRedisSenderManager({ config, metrics })
     }
 
     return createMemorySenderManager({ config, metrics })

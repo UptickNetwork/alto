@@ -100,7 +100,7 @@ contract EntryPointSimulations07 is EntryPoint, IEntryPointSimulations {
 
     function encodeBinarySearchCalldata(BinarySearchMode mode, PackedUserOperation calldata targetUserOp, uint256 gas)
         internal
-        view
+        pure
         returns (bytes memory)
     {
         UserOpInfo memory opInfo;
@@ -131,8 +131,7 @@ contract EntryPointSimulations07 is EntryPoint, IEntryPointSimulations {
         }
 
         if (mode == BinarySearchMode.CallGasLimit) {
-            bytes32 userOpHash = getUserOpHash(targetUserOp);
-            (address target, bytes memory targetCallData) = _encodeTargetCallData(targetUserOp, userOpHash);
+            (address target, bytes memory targetCallData) = _encodeTargetCallData(targetUserOp, opInfo.userOpHash);
             return abi.encodeWithSelector(this.simulateCallAndRevert.selector, target, targetCallData, gas);
         }
 

@@ -25,7 +25,7 @@ const freezeDeep = <T>(obj: T): T => {
         }
         return Object.freeze(frozenObj) as T
     }
-    return obj
+    return obj as T
 }
 
 export const createMethodHandler = <T extends z.ZodType>(methodConfig: {
