@@ -121,6 +121,64 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         description: "Enable flashblocks. Overrides some RPC calls parameters.",
         type: "boolean",
         default: false
+    },
+    "auth-mode": {
+        description: "RPC authentication mode",
+        type: "string",
+        choices: ["none", "api-key"],
+        default: "none"
+    },
+    "auth-api-keys": {
+        description:
+            "Comma separated API keys for protected methods (e.g. key1,key2)",
+        type: "string",
+        require: false,
+        default: ""
+    },
+    "auth-api-key-policies": {
+        description:
+            "JSON object for per-key policies: methods/rateLimitWindowMs/rateLimitMaxRequests/gasQuotaDailyLimit",
+        type: "string",
+        require: false,
+        default: "{}"
+    },
+    "auth-api-key-policies-redis-key": {
+        description: "Redis hash key used for dynamic per-key policies",
+        type: "string",
+        require: false,
+        default: "auth:api-key-policies"
+    },
+    "auth-api-key-policies-cache-ms": {
+        description: "In-memory cache TTL for Redis policy lookups (ms)",
+        type: "number",
+        require: false,
+        default: 3000
+    },
+    "auth-protected-methods": {
+        description: "Comma separated RPC methods that require authentication",
+        type: "string",
+        require: false,
+        default:
+            "eth_sendUserOperation,pimlico_sendUserOperationNow,boost_sendUserOperation"
+    },
+    "auth-rate-limit-window-ms": {
+        description: "Rate limit window duration in milliseconds",
+        type: "number",
+        require: false,
+        default: 1000
+    },
+    "auth-rate-limit-max-requests": {
+        description: "Maximum requests allowed in each rate limit window",
+        type: "number",
+        require: false,
+        default: 10
+    },
+    "auth-gas-quota-daily-limit": {
+        description:
+            "Daily gas quota per identity for protected methods (0 disables)",
+        type: "string",
+        require: false,
+        default: "0"
     }
 }
 

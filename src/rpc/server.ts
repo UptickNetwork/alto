@@ -21,6 +21,7 @@ import { toHex } from "viem"
 import type * as WebSocket from "ws"
 import { fromZodError } from "zod-validation-error"
 import type { AltoConfig } from "../createConfig"
+import { RequestSecurity } from "./security/requestSecurity"
 import rpcDecorators, { RpcStatus } from "../utils/fastify-rpc-decorators"
 import RpcReply from "../utils/rpc-reply"
 import type { RpcHandler } from "./rpcHandler"
@@ -65,6 +66,7 @@ export class Server {
     private rpcEndpoint: RpcHandler
     private registry: Registry
     private metrics: Metrics
+    private requestSecurity: RequestSecurity
 
     constructor({
         config,
@@ -155,6 +157,7 @@ export class Server {
         this.rpcEndpoint = rpcEndpoint
         this.registry = registry
         this.metrics = metrics
+        this.requestSecurity = new RequestSecurity({ config })
     }
 
     public start(): void {
@@ -296,9 +299,23 @@ export class Server {
                 )
             }
 
+            const identity = this.requestSecurity.getIdentity({
+                request,
+                method: bundlerRequest.method
+            })
+            await this.requestSecurity.enforceRateLimit({
+                identity,
+                method: bundlerRequest.method
+            })
+            await this.requestSecurity.enforceGasQuota({
+                identity,
+                bundlerRequest
+            })
+
             this.fastify.log.info(
                 {
                     data: JSON.stringify(bundlerRequest, null),
+                    identity: identity.source,
                     method: bundlerRequest.method
                 },
                 "incoming request"

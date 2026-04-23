@@ -15,6 +15,26 @@ const rpcMethodNames = bundlerRequestSchema.options.map(
     (s) => s.shape.method._def.value
 ) as [string, ...string[]]
 
+const authApiKeyPolicySchema = z.object({
+    methods: z
+        .array(z.string())
+        .refine(
+            (values) => values.every((value) => rpcMethodNames.includes(value)),
+            `Unknown protected method, available methods: ${rpcMethodNames.join(",")}`
+        )
+        .optional(),
+    rateLimitWindowMs: z.number().int().min(1).optional(),
+    rateLimitMaxRequests: z.number().int().min(1).optional(),
+    gasQuotaDailyLimit: z
+        .union([z.string(), z.number(), z.bigint()])
+        .transform((value) => BigInt(value))
+        .refine(
+            (value) => value >= 0n,
+            "gasQuotaDailyLimit must be greater than or equal to 0"
+        )
+        .optional()
+})
+
 export const bundlerArgsSchema = z.object({
     entrypoints: z
         .string()
@@ -87,7 +107,58 @@ export const bundlerArgsSchema = z.object({
         ),
     "enable-instant-bundling-endpoint": z.boolean(),
     "rpc-gas-estimate": z.boolean(),
-    "flashblocks-enabled": z.boolean()
+    "flashblocks-enabled": z.boolean(),
+    "auth-mode": z.enum(["none", "api-key"]).default("none"),
+    "auth-api-keys": z
+        .string()
+        .transform((value) =>
+            value
+                .split(",")
+                .map((entry) => entry.trim())
+                .filter((entry) => entry.length > 0)
+        )
+        .default(""),
+    "auth-api-key-policies": z
+        .string()
+        .transform((value) => {
+            if (value.trim() === "") {
+                return {}
+            }
+
+            const parsed = JSON.parse(value) as Record<string, unknown>
+            return z.record(z.string(), authApiKeyPolicySchema).parse(parsed)
+        })
+        .default("{}"),
+    "auth-api-key-policies-redis-key": z
+        .string()
+        .min(1)
+        .default("auth:api-key-policies"),
+    "auth-api-key-policies-cache-ms": z.number().int().min(0).default(3000),
+    "auth-protected-methods": z
+        .string()
+        .transform((value) =>
+            value
+                .split(",")
+                .map((entry) => entry.trim())
+                .filter((entry) => entry.length > 0)
+        )
+        .refine(
+            (values) => values.every((value) => rpcMethodNames.includes(value)),
+            `Unknown protected method, available methods: ${rpcMethodNames.join(",")}`
+        )
+        .default(
+            "eth_sendUserOperation,pimlico_sendUserOperationNow,boost_sendUserOperation"
+        ),
+    "auth-rate-limit-window-ms": z.number().int().min(1).default(1000),
+    "auth-rate-limit-max-requests": z.number().int().min(1).default(10),
+    "auth-gas-quota-daily-limit": z
+        .string()
+        .transform((value) => BigInt(value))
+        .refine(
+            (value) => value >= 0n,
+            "auth-gas-quota-daily-limit must be greater than or equal to 0"
+        )
+        .default("0")
 })
 
 export const executorArgsSchema = z.object({
