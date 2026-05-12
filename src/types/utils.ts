@@ -1,6 +1,8 @@
 export enum ValidationErrors {
     InvalidRequest = -32601,
     InvalidFields = -32602,
+    /** API key missing or invalid for a protected RPC method */
+    Unauthorized = -32001,
     SimulateValidation = -32500,
     SimulatePaymasterValidation = -32501,
     OpcodeValidation = -32502,

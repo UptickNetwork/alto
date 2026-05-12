@@ -196,7 +196,38 @@ export const serverArgsSchema = z.object({
         .number()
         .int()
         .min(1024)
-        .default(1024 * 1024) // 1 mb
+        .default(1024 * 1024), // 1 mb
+    "auth-mode": z.enum(["none", "api-key"]).default("none"),
+    "auth-api-keys": z
+        .string()
+        .optional()
+        .nullable()
+        .transform((val) => {
+            if (val === null || val === undefined || val.trim() === "") {
+                return new Set<string>()
+            }
+            return new Set(
+                val
+                    .split(",")
+                    .map((k) => k.trim())
+                    .filter((k) => k.length > 0)
+            )
+        }),
+    "auth-protected-methods": z
+        .string()
+        .optional()
+        .nullable()
+        .transform((val) => {
+            if (val === null || val === undefined || val.trim() === "") {
+                return new Set<string>()
+            }
+            return new Set(
+                val
+                    .split(",")
+                    .map((m) => m.trim())
+                    .filter((m) => m.length > 0)
+            )
+        })
 })
 
 export const rpcArgsSchema = z.object({

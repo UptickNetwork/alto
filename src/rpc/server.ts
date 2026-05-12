@@ -23,6 +23,7 @@ import { fromZodError } from "zod-validation-error"
 import type { AltoConfig } from "../createConfig"
 import rpcDecorators, { RpcStatus } from "../utils/fastify-rpc-decorators"
 import RpcReply from "../utils/rpc-reply"
+import { extractApiKeyFromRequest } from "./extract-api-key"
 import type { RpcHandler } from "./rpcHandler"
 
 // jsonBigIntOverride.ts
@@ -285,6 +286,25 @@ export class Server {
 
             const bundlerRequest = bundlerRequestParsing.data
             request.rpcMethod = bundlerRequest.method
+
+            if (this.config.authMode === "api-key") {
+                if (
+                    this.config.authProtectedMethods.has(
+                        bundlerRequest.method
+                    )
+                ) {
+                    const apiKey = extractApiKeyFromRequest(request)
+                    if (
+                        apiKey === undefined ||
+                        !this.config.authApiKeys.has(apiKey)
+                    ) {
+                        throw new RpcError(
+                            "Unauthorized: missing or invalid API key",
+                            ValidationErrors.Unauthorized
+                        )
+                    }
+                }
+            }
 
             if (
                 this.config.rpcMethods !== null &&

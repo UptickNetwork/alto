@@ -107,6 +107,11 @@ const getViemChain = ({
 
 export async function bundlerHandler(args_: IOptionsInput): Promise<void> {
     const args = parseArgs(args_)
+    if (args.authMode === "api-key" && args.authApiKeys.size === 0) {
+        throw new Error(
+            "auth-mode is api-key but auth-api-keys is empty; set at least one key"
+        )
+    }
     const logger = args.json
         ? initProductionLogger(args.logLevel)
         : initDebugLogger(args.logLevel)

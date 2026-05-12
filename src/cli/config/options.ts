@@ -564,6 +564,26 @@ export const serverOptions: CliCommandOptions<IServerArgsInput> = {
         description: "Enable websocket server",
         type: "boolean",
         require: false
+    },
+    "auth-mode": {
+        description:
+            'HTTP RPC authentication: "none" or "api-key" (query ?apikey=, x-api-key, or Bearer)',
+        type: "string",
+        require: false,
+        default: "none",
+        choices: ["none", "api-key"] as const
+    },
+    "auth-api-keys": {
+        description:
+            "Comma-separated API keys allowed when auth-mode is api-key",
+        type: "string",
+        require: false
+    },
+    "auth-protected-methods": {
+        description:
+            "Comma-separated JSON-RPC method names that require a valid API key when auth-mode is api-key",
+        type: "string",
+        require: false
     }
 }
 
