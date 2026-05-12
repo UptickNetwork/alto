@@ -61,7 +61,9 @@ module.exports = {
                 "--port",
                 process.env.ALTO_PORT ?? "3000",
                 "--log-level",
-                process.env.ALTO_LOG_LEVEL ?? "debug"
+                process.env.ALTO_LOG_LEVEL ?? "debug",
+                "--max-gas-per-bundle",
+                "200000000"
             ],
             env: {
                 // Sensitive keys: strongly recommended to inject from CI/CD secret manager.
