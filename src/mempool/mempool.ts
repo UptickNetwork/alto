@@ -265,7 +265,10 @@ export class Mempool {
         paymasters: Set<Address>
         factories: Set<Address>
     }> {
-        // TODO: this won't work with redis
+        // NOTE: under redis deployments this relies on each store's dumpLocal,
+        // which only reflects ops managed by THIS executor process. Entity
+        // multiple-role checks are therefore accurate within a single process
+        // but do not aggregate ops held by other executor instances.
         const allOps = await this.store.dumpOutstanding(entryPoint)
 
         const entities: {
@@ -582,6 +585,7 @@ export class Mempool {
             )
             return {
                 skip: true,
+                removeOutstanding: true,
                 paymasterDeposit,
                 stakedEntityCount,
                 knownEntities,

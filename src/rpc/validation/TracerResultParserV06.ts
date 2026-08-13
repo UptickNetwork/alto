@@ -145,7 +145,15 @@ function parseCallStack(tracerResults: BundlerTracerResult): CallEntry[] {
         }
     }
 
-    // TODO: verify that stack is empty at the end.
+    // [OP-011] The account's validation code must leave the stack empty. A
+    // non-empty stack at the end of validation indicates unbalanced push/pop
+    // (or other stack manipulation) and is rejected per ERC-4337.
+    if (stack.length > 0) {
+        throw new RpcError(
+            "Validation exited with a non-empty stack",
+            ValidationErrors.OpcodeValidation
+        )
+    }
 
     return out
 }

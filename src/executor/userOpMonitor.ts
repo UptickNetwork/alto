@@ -43,6 +43,9 @@ export class UserOpMonitor {
     private pendingBundles: Map<string, SubmittedBundleInfo> = new Map()
     private receiptCache: Map<HexData32, CachedReceipt> = new Map()
     private readonly receiptTtl = 5 * 60 * 1000 // 5 minutes
+    private readonly receiptCacheMaxSize = 10_000
+    private receiptCacheWrites = 0
+    private readonly receiptCachePruneEvery = 100
 
     constructor({
         config,
@@ -235,11 +238,17 @@ export class UserOpMonitor {
     }
 
     private cacheReceipt(userOpHash: Hex, receipt: UserOperationReceipt) {
-        this.pruneReceiptCache()
         this.receiptCache.set(userOpHash, {
             receipt,
             timestamp: Date.now()
         })
+        // Prune on an interval rather than on every write to avoid an O(n) full
+        // scan per cache write once the cache grows large.
+        this.receiptCacheWrites += 1
+        if (this.receiptCacheWrites >= this.receiptCachePruneEvery) {
+            this.receiptCacheWrites = 0
+            this.pruneReceiptCache()
+        }
     }
 
     private getCachedReceipt(
@@ -260,6 +269,18 @@ export class UserOpMonitor {
 
         for (const [userOpHash] of expiredEntries) {
             this.receiptCache.delete(userOpHash)
+        }
+
+        // Hard cap: if still over the limit (no entries expired), evict the
+        // oldest entries by timestamp to bound memory growth.
+        if (this.receiptCache.size > this.receiptCacheMaxSize) {
+            const sorted = Array.from(this.receiptCache.entries()).sort(
+                (a, b) => a[1].timestamp - b[1].timestamp
+            )
+            const excess = this.receiptCache.size - this.receiptCacheMaxSize
+            for (let i = 0; i < excess; i++) {
+                this.receiptCache.delete(sorted[i][0])
+            }
         }
     }
 

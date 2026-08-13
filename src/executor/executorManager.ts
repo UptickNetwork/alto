@@ -31,6 +31,7 @@ export class ExecutorManager {
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
+    private autoBundlingTimer: ReturnType<typeof setTimeout> | undefined
 
     constructor({
         config,
@@ -73,6 +74,12 @@ export class ExecutorManager {
         this.bundlingMode = bundleMode
 
         if (bundleMode === "manual") {
+            // Cancel any pending auto-bundling timer so a stale chain cannot
+            // re-arm itself after we switch to manual mode.
+            if (this.autoBundlingTimer) {
+                clearTimeout(this.autoBundlingTimer)
+                this.autoBundlingTimer = undefined
+            }
             await new Promise((resolve) =>
                 setTimeout(resolve, 2 * this.config.maxBundleInterval)
             )
@@ -84,6 +91,15 @@ export class ExecutorManager {
     }
 
     async autoScalingBundling() {
+        // Clear any previously-scheduled iteration to guarantee a single timer
+        // chain. Without this, repeated auto<->manual switches (or multiple
+        // auto calls) could stack concurrent timer loops and double the bundle
+        // rate.
+        if (this.autoBundlingTimer) {
+            clearTimeout(this.autoBundlingTimer)
+            this.autoBundlingTimer = undefined
+        }
+
         const now = Date.now()
         this.opsCount = this.opsCount.filter(
             (timestamp) => now - timestamp < RPM_WINDOW
@@ -114,7 +130,10 @@ export class ExecutorManager {
         )
 
         if (this.bundlingMode === "auto") {
-            setTimeout(this.autoScalingBundling.bind(this), nextInterval)
+            this.autoBundlingTimer = setTimeout(
+                this.autoScalingBundling.bind(this),
+                nextInterval
+            )
         }
     }
 
@@ -427,6 +446,11 @@ export class ExecutorManager {
             { transactionHash },
             "failed to cancel bundle after max retries"
         )
+
+        // Stop tracking the bundle so it does not leak in pendingBundles
+        // forever (it can no longer be monitored for a receipt once we give
+        // up cancelling). The executor wallet is released by the caller.
+        this.userOpMonitor.stopTrackingBundle(submittedBundle)
     }
 
     async replaceTransaction({

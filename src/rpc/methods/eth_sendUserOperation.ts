@@ -100,21 +100,34 @@ export async function addToMempoolIfValid({
 }): Promise<{ userOpHash: Hex; result: "added" | "queued" }> {
     rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
+    // Compute the userOpHash early (cheap, no RPC) so we can short-circuit
+    // deterministically-failed ops that are being replayed by the caller.
+    const userOpHash = await getUserOpHash({
+        userOp,
+        entryPointAddress: entryPoint,
+        chainId: rpcHandler.config.chainId,
+        publicClient: rpcHandler.config.publicClient
+    })
+
+    // Reject replayed ops that previously failed deterministically (e.g. AA25
+    // invalid account nonce) without re-running the expensive validation path.
+    const failedCheck = rpcHandler.isFailedUserOp(userOpHash)
+    if (failedCheck.failed) {
+        throw new RpcError(
+            failedCheck.reason ??
+                "UserOperation failed validation with reason: AA25 invalid account nonce",
+            ValidationErrors.InvalidFields
+        )
+    }
+
     // Execute multiple async operations in parallel
     const [
-        userOpHash,
         { queuedUserOps, validationResult },
         currentNonceSeq,
         [pvgSuccess, pvgErrorReason],
         [preMempoolSuccess, preMempoolError],
         [validEip7702Auth, validEip7702AuthError]
     ] = await Promise.all([
-        getUserOpHash({
-            userOp,
-            entryPointAddress: entryPoint,
-            chainId: rpcHandler.config.chainId,
-            publicClient: rpcHandler.config.publicClient
-        }),
         getUserOpValidationResult(rpcHandler, userOp, entryPoint),
         rpcHandler.getNonceSeq(userOp, entryPoint),
         validatePvg(apiVersion, rpcHandler, userOp, entryPoint, boost),
@@ -158,13 +171,15 @@ export async function addToMempoolIfValid({
         const reason =
             "UserOperation failed validation with reason: AA25 invalid account nonce"
         rpcHandler.eventManager.emitFailedValidation(userOpHash, reason, "AA25")
+        rpcHandler.addFailedUserOp(userOpHash, reason)
         throw new RpcError(reason, ValidationErrors.InvalidFields)
     }
 
     if (userOpNonceSeq > currentNonceSeq + 10n) {
         const reason =
-            "UserOperation failed validaiton with reason: AA25 invalid account nonce"
-        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason, "AA25")
+            "UserOperation failed validation with reason: AA24 gas price too low / nonce too high"
+        rpcHandler.eventManager.emitFailedValidation(userOpHash, reason, "AA24")
+        rpcHandler.addFailedUserOp(userOpHash, reason)
         throw new RpcError(reason, ValidationErrors.InvalidFields)
     }
 

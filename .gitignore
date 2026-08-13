@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+alto.service
 package.lock
 node_modules
 .nyc

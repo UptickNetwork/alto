@@ -209,6 +209,9 @@ export const createMempoolStore = ({
         }: EntryPointUserOpHashParam) => {
             try {
                 const { outstanding } = getStoreHandlers(entryPoint)
+                if (!(await outstanding.contains(userOpHash))) {
+                    return
+                }
                 const removed = await outstanding.remove(userOpHash)
                 logRemoveOperation(userOpHash, "outstanding", removed)
             } catch (err) {
@@ -226,6 +229,9 @@ export const createMempoolStore = ({
         }: EntryPointUserOpHashParam) => {
             try {
                 const { processing } = getStoreHandlers(entryPoint)
+                if (!(await processing.contains(userOpHash))) {
+                    return
+                }
                 const removed = await processing.remove(userOpHash)
                 logRemoveOperation(userOpHash, "processing", removed)
             } catch (err) {
@@ -243,6 +249,9 @@ export const createMempoolStore = ({
         }: EntryPointUserOpHashParam) => {
             try {
                 const { submitted } = getStoreHandlers(entryPoint)
+                if (!(await submitted.contains(userOpHash))) {
+                    return
+                }
                 const removed = await submitted.remove(userOpHash)
                 logRemoveOperation(userOpHash, "submitted", removed)
             } catch (err) {

@@ -21,7 +21,7 @@ import {
 } from "@alto/types"
 import type { Logger, Metrics } from "@alto/utils"
 import { getNonceKeyAndSequence, isVersion06, isVersion07 } from "@alto/utils"
-import { getContract, zeroAddress } from "viem"
+import { getContract, type Hex, zeroAddress } from "viem"
 import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { recoverAuthorizationAddress } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
@@ -44,7 +44,8 @@ export class RpcHandler {
     public logger: Logger
 
     private methodHandlers: Map<string, MethodHandler>
-    private eip7702CodeCache: Map<Address, boolean>
+    private eip7702CodeCache: Map<Address, number>
+    private failedUserOpCache: Map<Hex, FailedUserOpEntry>
 
     constructor({
         config,
@@ -92,6 +93,7 @@ export class RpcHandler {
 
         this.methodHandlers = new Map()
         this.eip7702CodeCache = new Map()
+        this.failedUserOpCache = new Map()
 
         registerHandlers(this)
     }
@@ -243,7 +245,8 @@ export class RpcHandler {
             this.config.publicClient.getTransactionCount({
                 address: userOp.sender
             }),
-            this.eip7702CodeCache.has(delegationDesignator)
+            this.eip7702CodeCache.has(delegationDesignator) &&
+            Date.now() <= (this.eip7702CodeCache.get(delegationDesignator) ?? 0)
                 ? Promise.resolve("has-code")
                 : this.config.publicClient.getCode({
                       address: delegationDesignator
@@ -308,7 +311,8 @@ export class RpcHandler {
         }
 
         // Use the delegateCode we already got from Promise.all
-        const hasCode = this.eip7702CodeCache.has(delegationDesignator)
+        const cachedExpiry = this.eip7702CodeCache.get(delegationDesignator)
+        const hasCode = cachedExpiry !== undefined && Date.now() <= cachedExpiry
 
         if (!hasCode) {
             if (delegateCode === undefined || delegateCode === "0x") {
@@ -318,7 +322,16 @@ export class RpcHandler {
                 ]
             }
 
-            this.eip7702CodeCache.set(delegationDesignator, true)
+            this.eip7702CodeCache.set(
+                delegationDesignator,
+                Date.now() + RpcHandler.EIP7702_CODE_CACHE_TTL_MS
+            )
+            if (
+                this.eip7702CodeCache.size >
+                RpcHandler.EIP7702_CODE_CACHE_MAX_SIZE
+            ) {
+                this.pruneEip7702CodeCache()
+            }
         }
 
         return [true, ""]
@@ -346,4 +359,74 @@ export class RpcHandler {
 
         return currentNonceSeq
     }
+
+    // Short-lived cache of deterministically-failed userOp hashes (e.g. AA25
+    // invalid account nonce). Replayed ops with the same hash are rejected early
+    // without re-running the expensive validation + simulation path.
+    private static readonly FAILED_USER_OP_CACHE_TTL_MS = 60_000
+    private static readonly FAILED_USER_OP_CACHE_MAX_SIZE = 1_000
+    // Delegation-designator code existence cache (EIP-7702). Addresses that have
+    // deployed code do not lose it, so a TTL here is just a bound on memory growth.
+    private static readonly EIP7702_CODE_CACHE_TTL_MS = 3_600_000
+    private static readonly EIP7702_CODE_CACHE_MAX_SIZE = 10_000
+
+    addFailedUserOp(userOpHash: Hex, reason: string) {
+        this.failedUserOpCache.set(userOpHash, {
+            expiry: Date.now() + RpcHandler.FAILED_USER_OP_CACHE_TTL_MS,
+            reason
+        })
+        if (this.failedUserOpCache.size > RpcHandler.FAILED_USER_OP_CACHE_MAX_SIZE) {
+            this.pruneFailedUserOpCache()
+        }
+    }
+
+    private pruneFailedUserOpCache() {
+        const now = Date.now()
+        // First drop everything already expired.
+        for (const [hash, entry] of this.failedUserOpCache) {
+            if (now > entry.expiry) {
+                this.failedUserOpCache.delete(hash)
+            }
+        }
+        // If still over the cap, evict the oldest entries by expiry timestamp.
+        if (this.failedUserOpCache.size > RpcHandler.FAILED_USER_OP_CACHE_MAX_SIZE) {
+            const sorted = Array.from(this.failedUserOpCache.entries()).sort(
+                (a, b) => a[1].expiry - b[1].expiry
+            )
+            const excess =
+                this.failedUserOpCache.size -
+                RpcHandler.FAILED_USER_OP_CACHE_MAX_SIZE
+            for (let i = 0; i < excess; i++) {
+                this.failedUserOpCache.delete(sorted[i][0])
+            }
+        }
+    }
+
+    private pruneEip7702CodeCache() {
+        const now = Date.now()
+        // Cache entries only hold addresses that have deployed code, which is
+        // stable, so dropping anything expired is sufficient to bound memory.
+        for (const [address, expiry] of this.eip7702CodeCache) {
+            if (now > expiry) {
+                this.eip7702CodeCache.delete(address)
+            }
+        }
+    }
+
+    isFailedUserOp(userOpHash: Hex): { failed: boolean; reason?: string } {
+        const entry = this.failedUserOpCache.get(userOpHash)
+        if (entry === undefined) {
+            return { failed: false }
+        }
+        if (Date.now() > entry.expiry) {
+            this.failedUserOpCache.delete(userOpHash)
+            return { failed: false }
+        }
+        return { failed: true, reason: entry.reason }
+    }
+}
+
+interface FailedUserOpEntry {
+    expiry: number
+    reason: string
 }
